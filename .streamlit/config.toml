@@ -1,7 +1,4 @@
 [server]
 fileWatcherType = "none"
-headless = true
-runOnSave = false
-
-[client]
-showSidebarNavigation = false
+enableXsrfProtection = true
+enableCORS = true
