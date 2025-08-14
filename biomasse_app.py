@@ -1,156 +1,166 @@
 # biomasse_app.py
 import streamlit as st
 import pandas as pd
-import os, uuid, hashlib, datetime, shutil, re
+import os, re, uuid, hashlib, datetime, io
 from fpdf import FPDF
+from PIL import Image
+from streamlit_drawable_canvas import st_canvas
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 
-# ------------------ Grund-Setup ------------------
+# ===================== Grund-Setup =====================
 st.set_page_config(page_title="Biomasse Abrechnung", page_icon="🌿", layout="wide")
 
-# Admin-Daten (fest)
-ADMIN_EMAIL = "riedlotmar0@gmail.com"
-ADMIN_PIN = "8319"
-
-# Pfade
-DATA_PATH = "data"
+ADMIN_PIN = "8319"  # wie gewünscht
+DATA_ROOT = "data"
+GLOBAL_LOG = os.path.join(DATA_ROOT, "lieferscheine", "index.csv")
 LOGO_PATH = "logo.png"
 
-# Basis-Ordner
-os.makedirs(f"{DATA_PATH}", exist_ok=True)
-os.makedirs(f"{DATA_PATH}/user", exist_ok=True)
-os.makedirs(f"{DATA_PATH}/lieferscheine", exist_ok=True)
-os.makedirs(f"{DATA_PATH}/suppliers", exist_ok=True)  # pro Lieferant eigener Ordner
+# Verzeichnisse
+def ensure_dirs():
+    os.makedirs(DATA_ROOT, exist_ok=True)
+    os.makedirs(os.path.join(DATA_ROOT, "lieferscheine"), exist_ok=True)
+    os.makedirs(os.path.join(DATA_ROOT, "suppliers"), exist_ok=True)
 
-# CSV-Dateien
-USERS_FILE = f"{DATA_PATH}/user/users.csv"                       # email, pass_hash, status, tos_accepted_at
-LIEFERSCHEINLOG_FILE = f"{DATA_PATH}/lieferscheine/index.csv"    # id, datum, kunde, material, basis, menge, einheit, gesamtpreis_eur, pdf_path, lieferant_email
+def email_key(e: str) -> str:
+    # saubere Ordnernamen pro Lieferant
+    return re.sub(r"[^a-zA-Z0-9]+", "_", (e or "").strip().lower())
 
-# ------------------ Utilities ------------------
-def sha256(txt: str) -> str:
-    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
+def sup_dir(email: str) -> str:
+    d = os.path.join(DATA_ROOT, "suppliers", email_key(email))
+    os.makedirs(d, exist_ok=True)
+    return d
 
 def load_csv(path: str, cols: list) -> pd.DataFrame:
     if os.path.exists(path):
         try:
             df = pd.read_csv(path)
-            for c in cols:
-                if c not in df.columns:
-                    df[c] = ""
-            return df[cols]
         except Exception:
-            return pd.DataFrame(columns=cols)
-    return pd.DataFrame(columns=cols)
+            df = pd.DataFrame(columns=cols)
+    else:
+        df = pd.DataFrame(columns=cols)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = "" if c not in ("Preis_pro_kg","Preis_pro_t","Preis_pro_m3","menge","gesamtpreis_eur") else 0.0
+    return df[cols]
 
 def save_csv(df: pd.DataFrame, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     df.to_csv(path, index=False)
 
-def email_slug(email: str) -> str:
-    """sicherer Ordnername pro Lieferant"""
-    return re.sub(r"[^a-z0-9]+", "_", email.strip().lower())
+def sha256(txt: str) -> str:
+    return hashlib.sha256((txt or "").encode("utf-8")).hexdigest()
 
-def supplier_paths(email: str) -> dict:
-    slug = email_slug(email)
-    base = f"{DATA_PATH}/suppliers/{slug}"
-    return {
-        "base": base,
-        "kunden": f"{base}/kunden.csv",
-        "material": f"{base}/material.csv",
-        "uploads": f"{base}/uploads",
-    }
+ensure_dirs()
 
-def ensure_supplier_files(email: str):
-    p = supplier_paths(email)
-    os.makedirs(p["base"], exist_ok=True)
-    os.makedirs(p["uploads"], exist_ok=True)
-    # Kunden
-    if not os.path.exists(p["kunden"]):
-        save_csv(pd.DataFrame(columns=["Kundenname", "Email"]), p["kunden"])
-    # Material
-    if not os.path.exists(p["material"]):
-        save_csv(pd.DataFrame(columns=["Material", "Preis_pro_kg", "Preis_pro_t", "Preis_pro_m3"]), p["material"])
+# ===== Nutzerdaten (global) =====
+USERS_FILE = os.path.join(DATA_ROOT, "users.csv")
+if not os.path.exists(USERS_FILE):
+    save_csv(pd.DataFrame(columns=[
+        "email","pass_hash","status","registered_at","approved_at",
+        "disclaimer_accepted","disclaimer_pdf"
+    ]), USERS_FILE)
 
-def init_files():
-    # Nutzerdatei
-    if not os.path.exists(USERS_FILE):
-        df = pd.DataFrame(columns=["email", "pass_hash", "status", "tos_accepted_at"])
-        # Admin als Systemnutzer (optional)
-        df.loc[len(df)] = [ADMIN_EMAIL, "", "approved_admin", ""]
-        save_csv(df, USERS_FILE)
-    else:
-        # fehlende Spalten ergänzen
-        users = load_csv(USERS_FILE, ["email", "pass_hash", "status", "tos_accepted_at"])
-        save_csv(users, USERS_FILE)
+# Globaler Lieferschein-Index
+if not os.path.exists(GLOBAL_LOG):
+    save_csv(pd.DataFrame(columns=[
+        "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur",
+        "pdf_path","lieferant_email"
+    ]), GLOBAL_LOG)
 
-    # Lieferschein-Index
-    if not os.path.exists(LIEFERSCHEINLOG_FILE):
-        save_csv(pd.DataFrame(columns=[
-            "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur","pdf_path","lieferant_email"
-        ]), LIEFERSCHEINLOG_FILE)
-
-init_files()
-
-def secrets_get(key: str, default=None):
+# ===== Helper: Secrets & Mail =====
+def secrets_get(key, default=None):
     try:
         return st.secrets[key]
     except Exception:
         return default
 
 def send_email(to_email: str, subject: str, body: str, attachment_path: str | None = None):
-    """E-Mail Versand via st.secrets: SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD"""
-    smtp_server = secrets_get("SMTP_SERVER")
-    smtp_port = int(secrets_get("SMTP_PORT", 587) or 587)
+    """SMTP via st.secrets: SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD"""
+    smtp_server = secrets_get("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(secrets_get("SMTP_PORT", 587))
     smtp_user = secrets_get("SMTP_USER")
     smtp_pass = secrets_get("SMTP_PASSWORD")
-
-    if not (smtp_server and smtp_user and smtp_pass):
-        st.warning("✉️ E-Mail-Versand nicht konfiguriert (Secrets fehlen).")
+    if not (smtp_user and smtp_pass):
+        st.info("✉️ Hinweis: E-Mail nicht gesendet (SMTP-Secrets fehlen).")
         return
-
     msg = MIMEMultipart()
     msg["From"] = smtp_user
     msg["To"] = to_email
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
-
     if attachment_path and os.path.exists(attachment_path):
         with open(attachment_path, "rb") as f:
             part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
         part["Content-Disposition"] = f'attachment; filename="{os.path.basename(attachment_path)}"'
         msg.attach(part)
-
     try:
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
             server.login(smtp_user, smtp_pass)
             server.send_message(msg)
     except Exception as e:
-        st.error(f"E-Mail-Versand fehlgeschlagen: {e}")
+        st.warning(f"E-Mail-Versand fehlgeschlagen: {e}")
 
-def create_delivery_pdf(kunde: str,
-                        material: str,
-                        basis: str,
-                        menge: float,
-                        einheit: str,
-                        preis_eur: float,
-                        datum: str,
-                        unterschrift_kunde: str,
-                        unterschrift_lieferant: str,
-                        out_path: str):
-    """Erstellt PDF-Lieferschein."""
+# ===== PDF: Haftungsausschluss =====
+DISCLAIMER_TEXT = (
+    "Haftungsausschluss und Nutzungsbedingungen\n\n"
+    "1) Keine Haftung für Schäden: Der Betreiber übernimmt keine Haftung für direkte oder "
+    "indirekte Schäden aus der Nutzung, soweit gesetzlich zulässig.\n"
+    "2) Eigenverantwortliche Nutzung: Eingaben und Berechnungen ohne Gewähr auf Vollständigkeit, "
+    "Richtigkeit oder Aktualität. Nutzer prüft die Richtigkeit seiner Eingaben.\n"
+    "3) Datenschutz: Personenbezogene Daten werden nur für App-Funktionen genutzt und nicht an "
+    "unberechtigte Dritte weitergegeben, außer es besteht eine gesetzliche Pflicht.\n"
+    "4) Änderungen: Bedingungen können angepasst werden; Änderungen gelten mit Veröffentlichung.\n"
+    "5) Rechtsgrundlage: EU-/AT-Recht findet Anwendung.\n\n"
+    "Mit meiner Unterschrift bestätige ich, dass ich den Haftungsausschluss gelesen, verstanden "
+    "und akzeptiert habe."
+)
+
+def create_disclaimer_pdf(email: str, name: str, sig_img: Image.Image, out_path: str):
     pdf = FPDF()
     pdf.add_page()
-
     if os.path.exists(LOGO_PATH):
         try:
             pdf.image(LOGO_PATH, x=10, y=8, w=28)
         except Exception:
             pass
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 12, "Haftungsausschluss – Biomasse App", ln=True, align="C")
+    pdf.ln(4)
+    pdf.set_font("Arial", "", 12)
+    pdf.multi_cell(0, 7, DISCLAIMER_TEXT)
+    pdf.ln(4)
+    pdf.cell(0, 8, f"Name: {name}", ln=True)
+    pdf.cell(0, 8, f"E-Mail: {email}", ln=True)
+    pdf.cell(0, 8, f"Datum: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+    # Signatur temporär speichern
+    if sig_img:
+        sig_tmp = os.path.join(DATA_ROOT, "tmp_sig_disclaimer.png")
+        sig_img.save(sig_tmp)
+        try:
+            pdf.ln(6)
+            pdf.cell(0, 8, "Unterschrift:", ln=True)
+            pdf.image(sig_tmp, x=20, y=pdf.get_y()+2, w=70)
+            pdf.ln(35)
+        except Exception:
+            pass
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    pdf.output(out_path)
 
+# ===== PDF: Lieferschein =====
+def create_delivery_pdf(kunde, material, basis, menge, einheit, preis_eur, datum,
+                        uk_text, ul_text, sig_kunde_img: Image.Image | None, sig_lief_img: Image.Image | None,
+                        out_path: str):
+    pdf = FPDF()
+    pdf.add_page()
+    if os.path.exists(LOGO_PATH):
+        try:
+            pdf.image(LOGO_PATH, x=10, y=8, w=28)
+        except Exception:
+            pass
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 12, "Lieferschein", ln=True, align="C")
     pdf.ln(4)
@@ -161,291 +171,226 @@ def create_delivery_pdf(kunde: str,
     pdf.cell(0, 8, f"Preis-Basis: {basis}", ln=True)
     pdf.cell(0, 8, f"Menge: {menge:.3f} {einheit}", ln=True)
     pdf.cell(0, 8, f"Gesamtpreis: {preis_eur:.2f} €", ln=True)
-    pdf.ln(8)
-    pdf.cell(0, 8, f"Unterschrift Kunde: {unterschrift_kunde}", ln=True)
-    pdf.cell(0, 8, f"Unterschrift Lieferant: {unterschrift_lieferant}", ln=True)
-    pdf.ln(10)
+    pdf.ln(6)
+    # Signaturblöcke
+    y_start = pdf.get_y()
+    pdf.cell(95, 8, f"Unterschrift Kunde: {uk_text}", ln=0)
+    pdf.cell(0, 8, f"Unterschrift Lieferant: {ul_text}", ln=1)
+    # Bilder
+    def put_sig(img: Image.Image | None, x):
+        if img:
+            tmp = os.path.join(DATA_ROOT, f"tmp_sig_{uuid.uuid4().hex}.png")
+            img.save(tmp)
+            try:
+                pdf.image(tmp, x=x, y=y_start+10, w=70)
+            except Exception:
+                pass
+    put_sig(sig_kunde_img, 20)
+    put_sig(sig_lief_img, 115)
+    pdf.ln(40)
     pdf.set_font("Arial", "I", 10)
     pdf.multi_cell(0, 6, "Automatisch erstellt von der Biomasse Abrechnung App.")
-
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     pdf.output(out_path)
 
-# ------------------ Branding / Header ------------------
-col_logo, col_title = st.columns([1, 6])
+# ===================== Session =====================
+if "role" not in st.session_state:
+    st.session_state.role = None      # "supplier" | "admin"
+if "email" not in st.session_state:
+    st.session_state.email = None
+
+# ===================== UI: Header =====================
+col_logo, col_title = st.columns([1,6])
 with col_logo:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, use_container_width=True)
 with col_title:
     st.markdown("<h1 style='margin-bottom:0'>🌿 Biomasse Abrechnung</h1>", unsafe_allow_html=True)
-    st.caption("Lieferanten-Login, Registrierung (mit Haftungsausschluss) & Adminlogin (PIN).")
+    st.caption("Einfach. Übersichtlich. Für Admin & Lieferanten.")
 
-# ------------------ Session State ------------------
-if "auth_role" not in st.session_state:
-    st.session_state.auth_role = None  # "admin" | "supplier"
-if "auth_email" not in st.session_state:
-    st.session_state.auth_email = None
-
-# ------------------ Auth / Registrierung ------------------
-def show_login_register():
+# ===================== AUTH =====================
+def auth_tabs():
     st.subheader("Anmeldung / Registrierung")
-    # Reihenfolge & Bezeichnungen nach Wunsch:
-    tabs = st.tabs(["🚚 Lieferanten-Login", "📝 Lieferant – Neu anmelden", "🔑 Adminlogin"])
+    tabs = st.tabs(["🚚 Lieferant (Login)", "📝 Lieferant (Neuanmeldung)", "🔑 Admin-Login"])
 
-    # 1) Lieferanten-Login
+    # --- Lieferant Login ---
     with tabs[0]:
-        email = st.text_input("E-Mail (Lieferant)", key="sup_login_email")
+        email = st.text_input("E-Mail", key="sup_login_email")
         pwd = st.text_input("Passwort", type="password", key="sup_login_pwd")
-        if st.button("Als Lieferant anmelden", key="sup_login_btn"):
-            users = load_csv(USERS_FILE, ["email", "pass_hash", "status", "tos_accepted_at"])
+        if st.button("Anmelden", key="sup_login_btn"):
+            users = load_csv(USERS_FILE, ["email","pass_hash","status","registered_at","approved_at",
+                                          "disclaimer_accepted","disclaimer_pdf"])
             row = users[users["email"] == email]
             if row.empty:
-                st.error("Benutzer nicht gefunden. Bitte zuerst neu anmelden.")
+                st.error("Benutzer nicht gefunden. Bitte zuerst registrieren.")
             else:
-                status = row["status"].values[0]
-                if status != "approved":
+                if row["status"].values[0] != "approved":
                     st.warning("Noch nicht freigeschaltet. Bitte Admin-Freigabe abwarten.")
-                elif sha256(pwd) == row["pass_hash"].values[0]:
-                    st.session_state.auth_role = "supplier"
-                    st.session_state.auth_email = email
-                    ensure_supplier_files(email)
-                    st.success("✅ Lieferant angemeldet.")
-                    st.rerun()
-                else:
+                elif sha256(pwd) != row["pass_hash"].values[0]:
                     st.error("❌ Passwort falsch.")
+                else:
+                    st.session_state.role = "supplier"
+                    st.session_state.email = email
+                    st.success("✅ Angemeldet.")
+                    st.rerun()
 
-    # 2) Lieferant – Neu anmelden (mit Haftungsausschluss)
+    # --- Lieferant Neuanmeldung (mit Disclaimer + Unterschrift) ---
     with tabs[1]:
-        st.markdown("**Registrierung für Lieferanten**")
-        email = st.text_input("E-Mail (Registrierung)", key="sup_reg_email")
-        pwd1 = st.text_input("Passwort", type="password", key="sup_reg_pwd1")
-        pwd2 = st.text_input("Passwort wiederholen", type="password", key="sup_reg_pwd2")
+        st.markdown("**Neuanmeldung für Lieferanten**")
+        n_email = st.text_input("E-Mail (Login)", key="reg_email")
+        n_name  = st.text_input("Vor- und Nachname / Firma", key="reg_name")
+        pwd1 = st.text_input("Passwort", type="password", key="reg_pwd1")
+        pwd2 = st.text_input("Passwort wiederholen", type="password", key="reg_pwd2")
+        st.markdown("**Haftungsausschluss (EU/Österreich):**")
+        with st.expander("Text anzeigen"):
+            st.write(DISCLAIMER_TEXT)
 
-        st.markdown("**Haftungsausschluss (Pflicht):**")
-        st.write(
-            "Ich akzeptiere, dass die App von **Privatperson Otmar Riedl** bereitgestellt wird, "
-            "ohne Gewährleistung oder Haftung für Schäden, Datenverlust oder Fehlfunktionen. "
-            "Die Nutzung erfolgt auf eigenes Risiko."
+        st.markdown("**Bitte zeichnen Sie Ihre Unterschrift (Finger/Maus):**")
+        can = st_canvas(
+            fill_color="rgba(255,255,255,0)",
+            stroke_width=2,
+            stroke_color="#000000",
+            background_color="#FFFFFF",
+            height=120,
+            width=500,
+            drawing_mode="freedraw",
+            key="reg_canvas"
         )
-        accept = st.checkbox("Ich habe den Haftungsausschluss gelesen und **akzeptiere** ihn.", key="sup_reg_accept")
+        accepted = st.checkbox("Ich habe den Haftungsausschluss gelesen und akzeptiere ihn.")
 
-        if st.button("Registrieren & Freigabe anfordern", key="sup_reg_btn"):
-            if not email or not pwd1:
+        if st.button("Registrieren & Freigabe anfordern", key="reg_btn"):
+            if not n_email or not pwd1:
                 st.error("Bitte E-Mail und Passwort eingeben.")
             elif pwd1 != pwd2:
                 st.error("Passwörter stimmen nicht überein.")
-            elif not accept:
+            elif not accepted:
                 st.error("Bitte Haftungsausschluss akzeptieren.")
+            elif not can.image_data:
+                st.error("Bitte Unterschrift zeichnen.")
             else:
-                users = load_csv(USERS_FILE, ["email", "pass_hash", "status", "tos_accepted_at"])
-                if not users[users["email"] == email].empty:
+                users = load_csv(USERS_FILE, ["email","pass_hash","status","registered_at","approved_at",
+                                              "disclaimer_accepted","disclaimer_pdf"])
+                if not users[users["email"] == n_email].empty:
                     st.warning("E-Mail ist bereits registriert.")
                 else:
-                    users.loc[len(users)] = [email, sha256(pwd1), "pending", datetime.datetime.now().isoformat()]
+                    # Signatur in PIL
+                    sig_img = Image.fromarray(can.image_data.astype("uint8")) if can.image_data is not None else None
+                    # PDF Haftungsausschluss
+                    out_pdf = os.path.join(sup_dir(n_email), "haftungsausschluss.pdf")
+                    create_disclaimer_pdf(n_email, n_name, sig_img, out_pdf)
+
+                    # Nutzer eintragen
+                    users.loc[len(users)] = [
+                        n_email, sha256(pwd1), "pending",
+                        datetime.datetime.now().isoformat(), "", "true", out_pdf
+                    ]
                     save_csv(users, USERS_FILE)
-                    # Info an Admin
-                    send_email(
-                        ADMIN_EMAIL,
-                        "Neue Lieferanten-Registrierung",
-                        f"Neue Registrierung: {email}\nBitte im Adminbereich freigeben."
+
+                    # Ordnerstruktur des Lieferanten vorbereiten
+                    save_csv(pd.DataFrame(columns=["Kundenname","Email"]), os.path.join(sup_dir(n_email), "kunden.csv"))
+                    save_csv(pd.DataFrame(columns=[
+                        "Material","Preis_pro_kg","Preis_pro_t","Preis_pro_m3","Basis"
+                    ]), os.path.join(sup_dir(n_email), "material.csv"))
+
+                    # E-Mails: an Neuanmelder & an Firmenadresse
+                    body = (
+                        f"Sehr geehrte/r {n_name},\n\n"
+                        "vielen Dank für Ihre Registrierung in der Biomasse-Abrechnungs-App.\n"
+                        "Sie haben den Haftungsausschluss akzeptiert. Im Anhang finden Sie eine Kopie.\n"
+                        "Freigabe erfolgt nach Prüfung durch den Admin.\n\n"
+                        "Mit freundlichen Grüßen\nBiomasse-Abrechnungs-Team"
                     )
+                    send_email(n_email, "Bestätigung Registrierung & Haftungsausschluss", body, out_pdf)
+                    send_email("app.biomasse@gmail.com",
+                               f"Neue Lieferanten-Registrierung: {n_email}",
+                               "Bitte im Admin-Bereich prüfen und freigeben.", out_pdf)
+
                     st.success("✅ Registriert. Freigabe durch Admin erforderlich.")
 
-    # 3) Adminlogin
+    # --- Admin Login (ohne vorbefüllte E-Mail) ---
     with tabs[2]:
-        email = st.text_input("Admin E-Mail", value=ADMIN_EMAIL, key="admin_email")
-        pin = st.text_input("Admin PIN", type="password", key="admin_pin_input")
+        a_email = st.text_input("Admin E-Mail", key="admin_email_input")
+        a_pin   = st.text_input("Admin PIN", type="password", key="admin_pin_input")
         if st.button("Als Admin anmelden", key="admin_login_btn"):
-            if email == ADMIN_EMAIL and pin == ADMIN_PIN:
-                st.session_state.auth_role = "admin"
-                st.session_state.auth_email = ADMIN_EMAIL
+            if a_pin == ADMIN_PIN and a_email:
+                st.session_state.role = "admin"
+                st.session_state.email = a_email
                 st.success("✅ Admin angemeldet.")
                 st.rerun()
             else:
-                st.error("❌ Falsche Admin-Daten.")
+                st.error("Falsche Admin-Daten.")
 
-# ------------------ Admin-Ansicht ------------------
+# ===================== Admin Ansicht =====================
 def admin_view():
-    st.success(f"Angemeldet als Admin: {st.session_state.auth_email}")
+    st.success(f"Admin: {st.session_state.email}")
+    tabs = st.tabs(["👥 Lieferanten", "📚 Archiv (alle)", "🔒 Datenschutz"])
 
-    # PIN für kritische Aktionen (Löschen)
-    with st.expander("🔒 Kritische Aktionen (PIN erforderlich)"):
-        pin_for_actions = st.text_input("Admin-PIN für Löschaktionen", type="password", key="admin_action_pin")
-
-    tabs = st.tabs([
-        "👥 Benutzer", "📦 Kunden (global)", "🪵 Materialien (global)",
-        "🧮 Lieferschein", "📚 Archiv", "🤖 KI (Wunschliste)", "🔒 Datenschutz"
-    ])
-
-    # Benutzerverwaltung
+    # --- Lieferanten verwalten ---
     with tabs[0]:
-        st.subheader("Benutzerverwaltung")
-        users = load_csv(USERS_FILE, ["email", "pass_hash", "status", "tos_accepted_at"])
-
+        users = load_csv(USERS_FILE, ["email","pass_hash","status","registered_at","approved_at",
+                                      "disclaimer_accepted","disclaimer_pdf"])
         st.markdown("### Ausstehende Freigaben")
-        pending = users[users["status"] == "pending"]
+        pending = users[users["status"]=="pending"]
         if pending.empty:
             st.info("Keine offenen Anträge.")
         else:
             for i, row in pending.iterrows():
-                c1, c2, c3 = st.columns([3,1,1])
+                c1, c2, c3 = st.columns([4,2,2])
                 with c1:
                     st.write(row["email"])
                 with c2:
                     if st.button("Freigeben", key=f"approve_{i}"):
-                        users.loc[i, "status"] = "approved"
+                        users.loc[i,"status"]="approved"
+                        users.loc[i,"approved_at"]=datetime.datetime.now().isoformat()
                         save_csv(users, USERS_FILE)
-                        # Ordner/Dateien für Lieferant anlegen
-                        ensure_supplier_files(row["email"])
-                        send_email(row["email"], "Freigeschaltet", "Ihr Zugang wurde freigeschaltet.")
+                        send_email(row["email"], "Freigeschaltet",
+                                   "Ihr Lieferanten-Zugang wurde freigeschaltet.")
                         st.success(f"{row['email']} freigeschaltet.")
                         st.rerun()
                 with c3:
-                    if st.button("Ablehnen", key=f"reject_{i}"):
-                        users = users.drop(index=i)
-                        save_csv(users, USERS_FILE)
-                        st.warning(f"{row['email']} abgelehnt und entfernt.")
-                        st.rerun()
+                    pin = st.text_input(f"PIN für Löschen ({row['email']})", type="password", key=f"pin_del_pending_{i}")
+                    if st.button("Ablehnen/Löschen", key=f"reject_{i}"):
+                        if pin != ADMIN_PIN:
+                            st.error("Falscher PIN.")
+                        else:
+                            users = users.drop(index=i)
+                            save_csv(users, USERS_FILE)
+                            st.warning(f"{row['email']} gelöscht.")
+                            st.rerun()
 
         st.markdown("---")
         st.markdown("### Freigeschaltete Lieferanten")
-        approved = users[users["status"]=="approved"][["email","status"]].reset_index(drop=True)
+        approved = users[users["status"]=="approved"][["email","approved_at"]].reset_index(drop=True)
         st.dataframe(approved, use_container_width=True)
 
-        # Löschen von freigeschalteten Lieferanten (PIN-geschützt)
-        if not approved.empty:
-            st.info("Lieferant löschen (inkl. Datenordner).")
-            del_email = st.selectbox("Lieferant wählen", approved["email"].tolist(), key="admin_del_email")
-            if st.button("❌ Lieferant löschen", key="admin_del_btn"):
-                if st.session_state.get("admin_action_pin") != ADMIN_PIN:
-                    st.error("Falscher PIN für Löschaktion.")
+        # Löschen freigeschalteter Lieferanten (inkl. Daten)
+        st.markdown("#### Lieferant löschen (inkl. seiner Kunden/Materialien)")
+        del_email = st.text_input("E-Mail des zu löschenden Lieferanten", key="del_supplier_email")
+        del_pin   = st.text_input("Admin-PIN bestätigen", type="password", key="del_supplier_pin")
+        if st.button("Lieferant endgültig löschen", key="del_supplier_btn"):
+            if del_pin != ADMIN_PIN:
+                st.error("Falscher PIN.")
+            else:
+                idx = users[users["email"]==del_email].index
+                if len(idx)==0:
+                    st.error("E-Mail nicht gefunden.")
                 else:
-                    # aus users.csv entfernen
-                    users = load_csv(USERS_FILE, ["email", "pass_hash", "status", "tos_accepted_at"])
-                    users = users[users["email"] != del_email]
+                    users = users.drop(index=idx)
                     save_csv(users, USERS_FILE)
-                    # Lieferanten-Ordner löschen
-                    sp = supplier_paths(del_email)["base"]
-                    if os.path.exists(sp):
-                        shutil.rmtree(sp, ignore_errors=True)
-                    st.success(f"Lieferant {del_email} und Datenordner gelöscht.")
-                    st.rerun()
+                    # Ordner löschen (soft: umbenennen)
+                    sd = sup_dir(del_email)
+                    if os.path.exists(sd):
+                        try:
+                            os.rename(sd, sd+"_DELETED_"+uuid.uuid4().hex[:6])
+                        except Exception:
+                            pass
+                    st.warning("Lieferant & seine Daten entfernt.")
 
-    # Globale Kunden (optional weiter nutzbar)
+    # --- Archiv (global) ---
     with tabs[1]:
-        st.subheader("Kundenverwaltung (global, optional)")
-        # Global weiter verfügbar für Admin — Lieferanten nutzen aber ihre eigenen Dateien
-        global_kunden = load_csv(f"{DATA_PATH}/kunden/kunden.csv", ["Kundenname", "Email"])
-        st.dataframe(global_kunden.sort_values("Kundenname"), use_container_width=True)
-        c1, c2 = st.columns(2)
-        with c1: kname = st.text_input("Kundenname (global)", key="admin_kname")
-        with c2: kmail = st.text_input("Kunden-E-Mail (global)", key="admin_kmail")
-        if st.button("Globalen Kunden hinzufügen", key="admin_k_add"):
-            if not kname:
-                st.error("Name fehlt.")
-            else:
-                global_kunden.loc[len(global_kunden)] = [kname, kmail]
-                os.makedirs(f"{DATA_PATH}/kunden", exist_ok=True)
-                save_csv(global_kunden, f"{DATA_PATH}/kunden/kunden.csv")
-                st.success("Globaler Kunde hinzugefügt.")
-                st.rerun()
-
-    # Globale Materialien
-    with tabs[2]:
-        st.subheader("Materialverwaltung (global, optional)")
-        mats = load_csv(f"{DATA_PATH}/materialien/material.csv", ["Material", "Preis_pro_kg", "Preis_pro_t", "Preis_pro_m3"])
-        st.dataframe(mats.sort_values("Material"), use_container_width=True)
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: mname = st.text_input("Material (global)", key="admin_mat_name")
-        with c2: mkg = st.number_input("Preis pro kg (€)", min_value=0.0, format="%.4f", key="admin_mat_kg")
-        with c3: mt  = st.number_input("Preis pro t (€)",  min_value=0.0, format="%.2f",  key="admin_mat_t")
-        with c4: mm3 = st.number_input("Preis pro m³ (€)", min_value=0.0, format="%.4f", key="admin_mat_m3")
-        if st.button("Globales Material hinzufügen", key="admin_mat_add"):
-            if not mname:
-                st.error("Materialname fehlt.")
-            else:
-                mats.loc[len(mats)] = [mname, mkg, mt, mm3]
-                os.makedirs(f"{DATA_PATH}/materialien", exist_ok=True)
-                save_csv(mats, f"{DATA_PATH}/materialien/material.csv")
-                st.success("Globales Material hinzugefügt.")
-                st.rerun()
-
-    # Lieferschein erstellen (Admin)
-    with tabs[3]:
-        st.subheader("Neuer Lieferschein (Admin)")
-        # Admin kann global wählen
-        kunden_global = load_csv(f"{DATA_PATH}/kunden/kunden.csv", ["Kundenname","Email"])
-        mats_global = load_csv(f"{DATA_PATH}/materialien/material.csv", ["Material","Preis_pro_kg","Preis_pro_t","Preis_pro_m3"])
-        if kunden_global.empty or mats_global.empty:
-            st.info("Für Admin-Lieferschein bitte globale Kunden & Materialien anlegen (Tabs oben).")
-        else:
-            c1, c2 = st.columns(2)
-            with c1:
-                kunde = st.selectbox("Kunde (global)", kunden_global["Kundenname"].sort_values().tolist(), key="admin_ls_kunde")
-                material = st.selectbox("Material (global)", mats_global["Material"].sort_values().tolist(), key="admin_ls_material")
-            with c2:
-                basis = st.radio("Preis-Basis", ["pro kg", "pro t", "pro m³"], key="admin_ls_basis")
-
-            if basis in ["pro kg", "pro t"]:
-                c3, c4 = st.columns(2)
-                with c3: voll = st.number_input("Gewicht voll (kg)", min_value=0.0, format="%.3f", key="admin_ls_voll")
-                with c4: leer = st.number_input("Gewicht leer (kg)", min_value=0.0, format="%.3f", key="admin_ls_leer")
-                netto = max(0.0, voll - leer)
-                menge = netto if basis == "pro kg" else netto/1000.0
-                einheit = "kg" if basis == "pro kg" else "t"
-            else:
-                menge = st.number_input("Volumen (m³)", min_value=0.0, format="%.3f", key="admin_ls_vol_m3")
-                einheit = "m³"
-
-            row = mats_global[mats_global["Material"] == material]
-            pkg = float(row["Preis_pro_kg"].values[0]) if not row.empty else 0.0
-            pt  = float(row["Preis_pro_t"].values[0]) if not row.empty else 0.0
-            pm3 = float(row["Preis_pro_m3"].values[0]) if not row.empty else 0.0
-
-            if basis == "pro kg":
-                gesamt = menge * pkg
-            elif basis == "pro t":
-                gesamt = menge * pt
-            else:
-                gesamt = menge * pm3
-
-            st.metric("Menge", f"{menge:.3f} {einheit}")
-            st.metric("Gesamtpreis (€)", f"{gesamt:.2f}")
-
-            uk = st.text_input("Unterschrift Kunde (Name)", key="admin_ls_uk")
-            ul = st.text_input("Unterschrift Lieferant (Name)", key="admin_ls_ul")
-
-            if st.button("PDF erstellen & versenden", key="admin_ls_btn"):
-                rid = uuid.uuid4().hex[:8]
-                datum = datetime.datetime.now().strftime("%Y-%m-%d")
-                pdf_path = f"{DATA_PATH}/lieferscheine/lieferschein_{rid}.pdf"
-                create_delivery_pdf(
-                    kunde, material, basis, menge, einheit, gesamt, datum, uk, ul, pdf_path
-                )
-                # Mail an Kunde (falls vorhanden) + Admin
-                kunde_mail = ""
-                try:
-                    kunde_mail = kunden_global[kunden_global["Kundenname"] == kunde]["Email"].values[0]
-                except Exception:
-                    pass
-                if kunde_mail:
-                    send_email(kunde_mail, "Lieferschein Biomasse", "Ihr Lieferschein im Anhang.", pdf_path)
-                send_email(ADMIN_EMAIL, "Kopie Lieferschein (Admin)", "Kopie zur Datensicherung.", pdf_path)
-
-                # Log
-                log = load_csv(LIEFERSCHEINLOG_FILE, [
-                    "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur","pdf_path","lieferant_email"
-                ])
-                log.loc[len(log)] = [
-                    rid, datum, kunde, material, basis, round(menge,3), einheit, round(gesamt,2), pdf_path, st.session_state.auth_email
-                ]
-                save_csv(log, LIEFERSCHEINLOG_FILE)
-                st.success(f"📄 PDF erstellt & versendet. Lieferschein-ID: {rid}")
-
-    # Archiv
-    with tabs[4]:
-        st.subheader("Lieferschein-Archiv (alle)")
-        log = load_csv(LIEFERSCHEINLOG_FILE, [
-            "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur","pdf_path","lieferant_email"
+        log = load_csv(GLOBAL_LOG, [
+            "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur",
+            "pdf_path","lieferant_email"
         ])
         if log.empty:
             st.info("Noch keine Lieferscheine vorhanden.")
@@ -459,173 +404,193 @@ def admin_view():
                             f"Download {os.path.basename(fp)}",
                             f,
                             file_name=os.path.basename(fp),
-                            key=f"admin_dl_{i}"
+                            key=f"adm_dl_{i}"
                         )
 
-    # KI-Wunschliste (Dummy)
-    with tabs[5]:
-        st.subheader("🤖 KI-Wunschliste (nur Admin)")
-        wunsch = st.text_area("Beschreibe die gewünschte Änderung/Erweiterung", key="admin_ki_wunsch")
-        pin = st.text_input("Admin-PIN bestätigen", type="password", key="admin_ki_pin")
-        if st.button("Änderungsplan prüfen (Simulation)", key="admin_ki_apply"):
-            if pin != ADMIN_PIN:
-                st.error("Falscher PIN.")
-            elif not wunsch.strip():
-                st.warning("Bitte Wunsch beschreiben.")
-            else:
-                st.info("Änderungsplan (Simulation):")
-                st.code(
-                    f"- Analyse: '{wunsch}'\n"
-                    f"- Betroffene Module: UI, Daten, PDF\n"
-                    f"- Vorgehen: Backup → Änderung → Test → Speichern\n"
-                    f"- Vorteile: bessere Bedienbarkeit\n"
-                    f"- Risiken: Validierung & Layout"
-                )
-                st.success("Simuliert. (Kein echter Code-Change)")
-
-    # Datenschutz
-    with tabs[6]:
-        st.subheader("🔒 Datenschutz – Privatperson Otmar Riedl")
+    with tabs[2]:
+        st.subheader("Datenschutz (Kurzinfo)")
         st.markdown("""
-**Verantwortlich:** Privatperson Otmar Riedl  
-**Zweck:** Abrechnung von Biomasse-Lieferungen (Kunden-, Material- und Mengen-/Preis-Daten).  
-**Rechtsgrundlage:** Vertrag/Anbahnung.  
-**Speicherung:** CSV-Dateien & erzeugte PDFs im Ordner `data/` (pro Lieferant separater Unterordner).  
-**Weitergabe:** Keine Weitergabe an Dritte; E-Mail-Versand nur an Beteiligte (Kunde, Lieferant/Admin).  
-**Sicherheit:** Login; Lieferanten-Passwörter als Hash; Admin-PIN; SMTP-Zugang über Streamlit-Secrets.  
-**Rechte:** Auskunft, Berichtigung, Löschung auf Anfrage an die Admin-E-Mail.
+**Zweck:** Abrechnung von Biomasse-Lieferungen.  
+**Speicherung:** CSV/PDF im Projektordner.  
+**E-Mail:** Versand nur an Beteiligte; SMTP via Secrets.  
         """)
 
-# ------------------ Lieferanten-Ansicht ------------------
+# ===================== Lieferant Ansicht =====================
 def supplier_view():
-    email = st.session_state.auth_email
-    st.success(f"Angemeldet als Lieferant: {email}")
+    st.success(f"Lieferant: {st.session_state.email}")
+    tabs = st.tabs(["📦 Kunden & Materialien", "🧮 Lieferschein", "📚 Archiv", "🔒 Datenschutz"])
 
-    # Eigene Dateien
-    sp = supplier_paths(email)
-    ensure_supplier_files(email)
-
-    tabs = st.tabs(["👥 Meine Kunden", "🪵 Meine Materialien", "🧮 Lieferschein", "📚 Mein Archiv", "🔒 Datenschutz"])
-
-    # Eigene Kunden
+    # --- Kunden & Materialien (pro Lieferant) ---
     with tabs[0]:
-        st.subheader("Meine Kunden")
-        kunden = load_csv(sp["kunden"], ["Kundenname","Email"])
+        sdir = sup_dir(st.session_state.email)
+        kunden_file = os.path.join(sdir, "kunden.csv")
+        mats_file   = os.path.join(sdir, "material.csv")
+        kunden = load_csv(kunden_file, ["Kundenname","Email"])
+        mats = load_csv(mats_file, ["Material","Preis_pro_kg","Preis_pro_t","Preis_pro_m3","Basis"])
+
+        st.markdown("#### Kunden")
         st.dataframe(kunden.sort_values("Kundenname"), use_container_width=True)
-        c1, c2 = st.columns(2)
-        with c1: kname = st.text_input("Kundenname", key="sup_kname")
-        with c2: kmail = st.text_input("Kunden-E-Mail", key="sup_kmail")
-        if st.button("Kunden hinzufügen", key="sup_k_add"):
+        kc1, kc2 = st.columns(2)
+        with kc1: kname = st.text_input("Kundenname", key="k_name")
+        with kc2: kmail = st.text_input("Kunden-E-Mail", key="k_mail")
+        if st.button("Kunde hinzufügen", key="k_add"):
             if not kname:
                 st.error("Name fehlt.")
             else:
                 kunden.loc[len(kunden)] = [kname, kmail]
-                save_csv(kunden, sp["kunden"])
+                save_csv(kunden, kunden_file)
                 st.success("Kunde hinzugefügt.")
                 st.rerun()
 
-    # Eigene Materialien
-    with tabs[1]:
-        st.subheader("Meine Materialien")
-        mats = load_csv(sp["material"], ["Material","Preis_pro_kg","Preis_pro_t","Preis_pro_m3"])
+        st.markdown("---")
+        st.markdown("#### Materialien (Preisbasis fix je Material)")
         st.dataframe(mats.sort_values("Material"), use_container_width=True)
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: mname = st.text_input("Material", key="sup_mat_name")
-        with c2: mkg = st.number_input("Preis pro kg (€)", min_value=0.0, format="%.4f", key="sup_mat_kg")
-        with c3: mt  = st.number_input("Preis pro t (€)",  min_value=0.0, format="%.2f",  key="sup_mat_t")
-        with c4: mm3 = st.number_input("Preis pro m³ (€)", min_value=0.0, format="%.4f", key="sup_mat_m3")
-        if st.button("Material hinzufügen", key="sup_mat_add"):
+        mc1, mc2, mc3, mc4, mc5 = st.columns([2,1,1,1,1])
+        with mc1: mname = st.text_input("Material", key="m_name")
+        with mc2: mkg = st.number_input("€/kg", min_value=0.0, format="%.4f", key="m_kg")
+        with mc3: mt  = st.number_input("€/t",  min_value=0.0, format="%.2f",  key="m_t")
+        with mc4: mm3 = st.number_input("€/m³", min_value=0.0, format="%.4f", key="m_m3")
+        with mc5: basis = st.selectbox("Basis", ["pro kg","pro t","pro m³"], key="m_basis")
+        if st.button("Material hinzufügen/aktualisieren", key="m_add"):
             if not mname:
                 st.error("Materialname fehlt.")
             else:
-                mats.loc[len(mats)] = [mname, mkg, mt, mm3]
-                save_csv(mats, sp["material"])
-                st.success("Material hinzugefügt.")
+                # upsert
+                idx = mats[mats["Material"]==mname].index
+                if len(idx)>0:
+                    mats.loc[idx, ["Preis_pro_kg","Preis_pro_t","Preis_pro_m3","Basis"]] = [mkg, mt, mm3, basis]
+                else:
+                    mats.loc[len(mats)] = [mname, mkg, mt, mm3, basis]
+                save_csv(mats, mats_file)
+                st.success("Material gespeichert.")
                 st.rerun()
 
-    # Lieferschein erfassen
-    with tabs[2]:
-        st.subheader("Neuer Lieferschein")
-        kunden = load_csv(sp["kunden"], ["Kundenname","Email"])
-        mats   = load_csv(sp["material"], ["Material","Preis_pro_kg","Preis_pro_t","Preis_pro_m3"])
-        if kunden.empty or mats.empty:
-            st.info("Bitte zuerst eigene Kunden & Materialien anlegen.")
+    # --- Lieferschein ---
+    with tabs[1]:
+        sdir = sup_dir(st.session_state.email)
+        kunden_file = os.path.join(sdir, "kunden.csv")
+        mats_file   = os.path.join(sdir, "material.csv")
+        kunden = load_csv(kunden_file, ["Kundenname","Email"])
+        mats = load_csv(mats_file, ["Material","Preis_pro_kg","Preis_pro_t","Preis_pro_m3","Basis"])
+
+        if kunden.empty:
+            st.info("Bitte zuerst Kunden anlegen.")
+            return
+        if mats.empty:
+            st.info("Bitte zuerst Materialien anlegen.")
+            return
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            kunde = st.selectbox("Kunde auswählen", kunden["Kundenname"].sort_values().tolist(), key="ls_kunde")
+        with sc2:
+            # filter: nur Materialien des Lieferanten
+            material = st.selectbox("Material", mats["Material"].sort_values().tolist(), key="ls_material")
+
+        # Preisbasis kommt aus Material
+        row = mats[mats["Material"] == material]
+        basis = row["Basis"].values[0] if not row.empty else "pro kg"
+        pkg = float(row["Preis_pro_kg"].values[0]) if not row.empty else 0.0
+        pt  = float(row["Preis_pro_t"].values[0]) if not row.empty else 0.0
+        pm3 = float(row["Preis_pro_m3"].values[0]) if not row.empty else 0.0
+
+        st.markdown(f"**Preis-Basis (fix):** {basis}")
+
+        if basis in ["pro kg", "pro t"]:
+            c3, c4 = st.columns(2)
+            with c3: voll = st.number_input("Gewicht voll (kg)", min_value=0.0, format="%.3f", key="ls_voll")
+            with c4: leer = st.number_input("Gewicht leer (kg)", min_value=0.0, format="%.3f", key="ls_leer")
+            netto = max(0.0, (voll - leer))
+            menge = netto if basis == "pro kg" else (netto/1000.0)
+            einheit = "kg" if basis == "pro kg" else "t"
         else:
-            c1, c2 = st.columns(2)
-            with c1:
-                kunde = st.selectbox("Kunde", kunden["Kundenname"].sort_values().tolist(), key="sup_ls_kunde")
-                material = st.selectbox("Material", mats["Material"].sort_values().tolist(), key="sup_ls_material")
-            with c2:
-                basis = st.radio("Preis-Basis", ["pro kg", "pro t", "pro m³"], key="sup_ls_basis")
+            menge = st.number_input("Volumen (m³)", min_value=0.0, format="%.3f", key="ls_m3")
+            einheit = "m³"
 
-            if basis in ["pro kg", "pro t"]:
-                c3, c4 = st.columns(2)
-                with c3: voll = st.number_input("Gewicht voll (kg)", min_value=0.0, format="%.3f", key="sup_ls_voll")
-                with c4: leer = st.number_input("Gewicht leer (kg)", min_value=0.0, format="%.3f", key="sup_ls_leer")
-                netto = max(0.0, voll - leer)
-                menge = netto if basis == "pro kg" else netto/1000.0
-                einheit = "kg" if basis == "pro kg" else "t"
+        if basis == "pro kg":
+            gesamt = menge * pkg
+        elif basis == "pro t":
+            gesamt = menge * pt
+        else:
+            gesamt = menge * pm3
+
+        st.metric("Menge", f"{menge:.3f} {einheit}")
+        st.metric("Gesamtpreis (€)", f"{gesamt:.2f}")
+
+        st.markdown("**Unterschrift Kunde (zeichnen):**")
+        canv_kunde = st_canvas(
+            fill_color="rgba(255,255,255,0)",
+            stroke_width=2,
+            stroke_color="#000000",
+            background_color="#FFFFFF",
+            height=120,
+            width=450,
+            drawing_mode="freedraw",
+            key="sig_kunde"
+        )
+        uk = st.text_input("Name Kunde (für PDF)", key="uk_text")
+
+        st.markdown("**Unterschrift Lieferant (zeichnen):**")
+        canv_lief = st_canvas(
+            fill_color="rgba(255,255,255,0)",
+            stroke_width=2,
+            stroke_color="#000000",
+            background_color="#FFFFFF",
+            height=120,
+            width=450,
+            drawing_mode="freedraw",
+            key="sig_lief"
+        )
+        ul = st.text_input("Name Lieferant (für PDF)", key="ul_text")
+
+        if st.button("PDF erstellen & senden", key="ls_pdf_btn"):
+            if not canv_kunde.image_data or not canv_lief.image_data:
+                st.error("Bitte beide Unterschriften zeichnen.")
             else:
-                menge = st.number_input("Volumen (m³)", min_value=0.0, format="%.3f", key="sup_ls_vol_m3")
-                einheit = "m³"
-
-            row = mats[mats["Material"] == material]
-            pkg = float(row["Preis_pro_kg"].values[0]) if not row.empty else 0.0
-            pt  = float(row["Preis_pro_t"].values[0]) if not row.empty else 0.0
-            pm3 = float(row["Preis_pro_m3"].values[0]) if not row.empty else 0.0
-
-            if basis == "pro kg":
-                gesamt = menge * pkg
-            elif basis == "pro t":
-                gesamt = menge * pt
-            else:
-                gesamt = menge * pm3
-
-            st.metric("Menge", f"{menge:.3f} {einheit}")
-            st.metric("Gesamtpreis (€)", f"{gesamt:.2f}")
-
-            uk = st.text_input("Unterschrift Kunde (Name)", key="sup_ls_uk")
-            ul = st.text_input("Unterschrift Lieferant (Name)", key="sup_ls_ul")
-
-            if st.button("PDF erstellen & versenden", key="sup_ls_btn"):
+                sig_k_img = Image.fromarray(canv_kunde.image_data.astype("uint8"))
+                sig_l_img = Image.fromarray(canv_lief.image_data.astype("uint8"))
                 rid = uuid.uuid4().hex[:8]
                 datum = datetime.datetime.now().strftime("%Y-%m-%d")
-                pdf_path = f"{DATA_PATH}/lieferscheine/lieferschein_{rid}.pdf"
+                pdf_path = os.path.join(DATA_ROOT, "lieferscheine", f"lieferschein_{rid}.pdf")
+
                 create_delivery_pdf(
-                    kunde, material, basis, menge, einheit, gesamt, datum, uk, ul, pdf_path
+                    kunde, material, basis, menge, einheit, gesamt, datum,
+                    uk, ul, sig_k_img, sig_l_img, pdf_path
                 )
+
                 # Empfänger
-                kunde_mail = ""
                 try:
-                    kunde_mail = kunden[kunden["Kundenname"] == kunde]["Email"].values[0]
+                    kunde_mail = kunden[kunden["Kundenname"]==kunde]["Email"].values[0]
                 except Exception:
-                    pass
-
+                    kunde_mail = ""
+                subj = "Lieferschein Biomasse"
+                body = "Im Anhang finden Sie den Lieferschein."
                 if kunde_mail:
-                    send_email(kunde_mail, "Lieferschein Biomasse", "Ihr Lieferschein im Anhang.", pdf_path)
-                send_email(email, "Kopie Lieferschein", "Kopie zur Datensicherung.", pdf_path)
-                if email != ADMIN_EMAIL:
-                    send_email(ADMIN_EMAIL, "Kopie Lieferschein (Admin)", "Kopie zur Datensicherung.", pdf_path)
+                    send_email(kunde_mail, subj, body, pdf_path)
+                send_email(st.session_state.email, "Kopie Lieferschein", "Kopie zur Datensicherung.", pdf_path)
+                send_email("app.biomasse@gmail.com", "Kopie Lieferschein (Admin)", "Kopie zur Datensicherung.", pdf_path)
 
-                # Log
-                log = load_csv(LIEFERSCHEINLOG_FILE, [
-                    "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur","pdf_path","lieferant_email"
+                # Logs
+                glog = load_csv(GLOBAL_LOG, [
+                    "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur",
+                    "pdf_path","lieferant_email"
                 ])
-                log.loc[len(log)] = [
-                    rid, datum, kunde, material, basis, round(menge,3), einheit, round(gesamt,2), pdf_path, email
+                glog.loc[len(glog)] = [
+                    rid, datum, kunde, material, basis, round(menge,3), einheit, round(gesamt,2), pdf_path, st.session_state.email
                 ]
-                save_csv(log, LIEFERSCHEINLOG_FILE)
-                st.success(f"📄 PDF erstellt & versendet. Lieferschein-ID: {rid}")
+                save_csv(glog, GLOBAL_LOG)
 
-    # Archiv (eigene)
-    with tabs[3]:
-        st.subheader("Mein Lieferschein-Archiv")
-        log = load_csv(LIEFERSCHEINLOG_FILE, [
-            "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur","pdf_path","lieferant_email"
+                st.success(f"📄 PDF erstellt & versendet. ID: {rid}")
+
+    # --- Archiv (eigene) ---
+    with tabs[2]:
+        log = load_csv(GLOBAL_LOG, [
+            "id","datum","kunde","material","basis","menge","einheit","gesamtpreis_eur",
+            "pdf_path","lieferant_email"
         ])
-        own = log[log["lieferant_email"] == email]
+        own = log[log["lieferant_email"] == st.session_state.email]
         if own.empty:
-            st.info("Noch keine Lieferscheine vorhanden.")
+            st.info("Noch keine Lieferscheine.")
         else:
             st.dataframe(own.sort_values("datum", ascending=False), use_container_width=True)
             for i, r in own.iterrows():
@@ -636,39 +601,38 @@ def supplier_view():
                             f"Download {os.path.basename(fp)}",
                             f,
                             file_name=os.path.basename(fp),
-                            key=f"sup_dl_{i}"
+                            key=f"dl_{i}"
                         )
 
-    with tabs[4]:
-        st.subheader("🔒 Datenschutz – Privatperson Otmar Riedl")
+    with tabs[3]:
+        st.subheader("Datenschutz (Kurzinfo)")
         st.markdown("""
 **Zweck:** Abrechnung von Biomasse-Lieferungen.  
-**Speicherung:** CSV/PDF lokal im Ordner `data/` (eigener Unterordner pro Lieferant).  
-**E-Mail:** Versand nur an Beteiligte; SMTP-Zugang über Secrets.  
+**Speicherung:** CSV/PDF lokal im Projektordner.  
+**E-Mail:** Versand nur an Beteiligte; SMTP via Secrets.  
         """)
 
-# ------------------ Routing ------------------
-def show_topbar():
+# ===================== Sidebar / Routing =====================
+def topbar():
     with st.sidebar:
         st.markdown("### Navigation")
-        if st.session_state.auth_role == "admin":
+        if st.session_state.role == "admin":
             st.write("• Admin-Bereich")
-        elif st.session_state.auth_role == "supplier":
+        elif st.session_state.role == "supplier":
             st.write("• Lieferanten-Bereich")
-        if st.button("Abmelden", key="logout_btn"):
-            st.session_state.auth_role = None
-            st.session_state.auth_email = None
-            st.success("Abgemeldet.")
+        if st.button("Abmelden"):
+            st.session_state.role = None
+            st.session_state.email = None
             st.rerun()
 
 # Start
-if st.session_state.auth_role is None:
-    show_login_register()
+if st.session_state.role is None:
+    auth_tabs()
 else:
-    show_topbar()
-    if st.session_state.auth_role == "admin":
+    topbar()
+    if st.session_state.role == "admin":
         admin_view()
-    elif st.session_state.auth_role == "supplier":
+    elif st.session_state.role == "supplier":
         supplier_view()
 
 st.markdown("---")
