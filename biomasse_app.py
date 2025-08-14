@@ -9,6 +9,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
+from streamlit_drawable_canvas import st_canvas
+from PIL import Image
+import numpy as np
 
 # ===================== Grund-Setup =====================
 st.set_page_config(page_title="Biomasse Abrechnung", page_icon="🌿", layout="wide")
@@ -637,3 +640,4 @@ else:
 
 st.markdown("---")
 st.caption("© 2025 Biomasse Abrechnung – Privatperson Otmar Riedl")
+
