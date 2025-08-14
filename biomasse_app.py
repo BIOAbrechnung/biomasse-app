@@ -205,12 +205,56 @@ def create_delivery_pdf(kunde, material, basis, menge, einheit, preis_eur, datum
                 pdf.image(tmp, x=x, y=y_start+10, w=70)
             except Exception:
                 pass
-    put_sig(sig_kunde_img, 20)
-    put_sig(sig_lief_img, 115)
-    pdf.ln(40)
-    pdf.set_font("Arial", "I", 10)
-    pdf.multi_cell(0, 6, "Automatisch erstellt von der Biomasse Abrechnung App.")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    from PIL import Image
+import io
+import numpy as np
+
+def is_valid_image(img_data):
+    """Prüft, ob img_data ein gültiges Bild ist."""
+    if img_data is None:
+        return False
+    if isinstance(img_data, np.ndarray):
+        return img_data.size > 0
+    if isinstance(img_data, (bytes, bytearray)):
+        try:
+            Image.open(io.BytesIO(img_data))
+            return True
+        except:
+            return False
+    if isinstance(img_data, io.BytesIO):
+        try:
+            Image.open(img_data)
+            return True
+        except:
+            return False
+    return False
+
+def put_sig_safe(img_data, y_pos):
+    """Fügt Signatur ins PDF ein, wenn gültig."""
+    if is_valid_image(img_data):
+        try:
+            put_sig(img_data, y_pos)
+        except Exception as e:
+            st.error(f"Fehler beim Einfügen der Signatur: {e}")
+    else:
+        st.warning(f"⚠ Signatur an Position {y_pos} fehlt oder ist ungültig.")
+
+# ================= PDF Inhalt =================
+# Kundensignatur einfügen
+put_sig_safe(sig_kunde_img, 20)
+
+# Lieferantensignatur einfügen
+put_sig_safe(sig_lief_img, 115)
+
+# Restlicher PDF-Text
+pdf.ln(40)
+pdf.set_font("Arial", "I", 10)
+pdf.multi_cell(0, 6, "Automatisch erstellt von der Biomasse Abrechnung")
+
+# Datei speichern (Ordner vorher anlegen)
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+pdf.output(out_path)
+
     pdf.output(out_path)
 
 # ===================== Session =====================
@@ -729,6 +773,7 @@ else:
 
 st.markdown("---")
 st.caption("© 2025 Biomasse Abrechnung – Privatperson Otmar Riedl")
+
 
 
 
