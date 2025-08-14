@@ -3,3 +3,4 @@ pandas==2.3.1
 fpdf==1.7.2
 pillow==11.3.0
 streamlit-drawable-canvas==0.9.3
+streamlit-drawable-canvas==0.9.3
