@@ -230,8 +230,78 @@ with col_title:
 
 # ===================== AUTH =====================
 def auth_tabs():
-    st.subheader("Anmeldung / Registrierung")
-    tabs = st.tabs(["🚚 Lieferant (Login)", "📝 Lieferant (Neuanmeldung)", "🔑 Admin-Login"])
+    tab1, tab2 = st.tabs(["Login", "Registrieren"])
+
+    # -------------------- LOGIN --------------------
+    with tab1:
+        st.subheader("Login")
+        email = st.text_input("E-Mail", key="login_email")
+        password = st.text_input("Passwort", type="password", key="login_pass")
+
+        if st.button("Einloggen"):
+            users = load_csv(USERS_FILE, ["email", "pass_hash", "status"])
+            user = next((u for u in users if u["email"] == email and check_password(password, u["pass_hash"])), None)
+            if user:
+                st.session_state.user = user
+                st.success(f"Willkommen {email}!")
+            else:
+                st.error("Ungültige E-Mail oder Passwort.")
+
+    # -------------------- REGISTRIEREN --------------------
+    with tab2:
+        st.subheader("Neuen Account erstellen")
+        new_email = st.text_input("E-Mail", key="reg_email")
+        pass1 = st.text_input("Passwort", type="password", key="reg_pass1")
+        pass2 = st.text_input("Passwort bestätigen", type="password", key="reg_pass2")
+
+        # Haftungsausschluss (nur bei Neuanmeldung)
+        st.markdown("### Haftungsausschluss")
+        st.info(
+            "Mit der Registrierung bestätige ich, dass ich die Haftungsbedingungen gelesen habe "
+            "und den Betreiber dieser App von jeglicher Haftung freistelle."
+        )
+        accepted = st.checkbox("Ich akzeptiere den Haftungsausschluss")
+
+        # Unterschriftenfeld
+        st.markdown("### Unterschrift")
+        from streamlit_drawable_canvas import st_canvas
+        can = st_canvas(
+            fill_color="rgba(255,255,255,0)",
+            stroke_width=2,
+            stroke_color="#000000",
+            background_color="#FFFFFF",
+            height=120,
+            width=500,
+            drawing_mode="freedraw",
+            key="canvas"
+        )
+
+        if st.button("Registrieren"):
+            if pass1 != pass2:
+                st.error("Passwörter stimmen nicht überein.")
+            elif not accepted:
+                st.error("Bitte Haftungsausschluss akzeptieren.")
+            elif not hasattr(can, "image_data") or can.image_data is None or (hasattr(can.image_data, "any") and not can.image_data.any()):
+                st.error("Bitte Unterschrift zeichnen.")
+            else:
+                # Nutzer speichern
+                users = load_csv(USERS_FILE, ["email", "pass_hash", "status"])
+                if any(u["email"] == new_email for u in users):
+                    st.error("E-Mail bereits registriert.")
+                else:
+                    users.append({"email": new_email, "pass_hash": hash_password(pass1), "status": "pending"})
+                    save_csv(USERS_FILE, ["email", "pass_hash", "status"], users)
+                    st.success("Registrierung erfolgreich. Freischaltung durch Admin erforderlich.")
+
+                    # PDF mit Haftungsausschluss an Firmenmail + neue E-Mail
+                    pdf_path = os.path.join(DATA_ROOT, f"haftung_{new_email}.pdf")
+                    from reportlab.pdfgen import canvas as pdfcanvas
+                    c = pdfcanvas.Canvas(pdf_path)
+                    c.drawString(100, 750, "Haftungsausschluss bestätigt von:")
+                    c.drawString(100, 730, new_email)
+                    c.save()
+                    send_email("app.biomasse@gmail.com", f"Neue Anmeldung: {new_email}", "Haftungsausschluss bestätigt.", pdf_path)
+                    send_email(new_email, "Ihre Registrierung", "Vielen Dank für Ihre Registrierung und Bestätigung des Haftungsausschlusses.", pdf_path)
 
     # --- Lieferant Login ---
     with tabs[0]:
@@ -659,6 +729,7 @@ else:
 
 st.markdown("---")
 st.caption("© 2025 Biomasse Abrechnung – Privatperson Otmar Riedl")
+
 
 
 
