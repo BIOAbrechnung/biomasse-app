@@ -2,6 +2,21 @@
 import streamlit as st
 import pandas as pd
 import os, re, uuid, hashlib, datetime, io
+import os
+
+# Basis-Datenverzeichnis festlegen
+DATA_ROOT = os.path.join(os.getcwd(), "data")
+
+# Verzeichnisse sicherstellen
+def ensure_dirs():
+    os.makedirs(DATA_ROOT, exist_ok=True)
+    os.makedirs(os.path.join(DATA_ROOT, "lieferscheine"), exist_ok=True)
+    os.makedirs(os.path.join(DATA_ROOT, "suppliers"), exist_ok=True)
+
+# Beim Start der App automatisch die Verzeichnisse anlegen
+if __name__ == "__main__":
+    ensure_dirs()
+
 from fpdf import FPDF
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
@@ -642,6 +657,7 @@ else:
 
 st.markdown("---")
 st.caption("© 2025 Biomasse Abrechnung – Privatperson Otmar Riedl")
+
 
 
 
