@@ -26,6 +26,7 @@ def ensure_dirs():
     os.makedirs(DATA_ROOT, exist_ok=True)
     os.makedirs(os.path.join(DATA_ROOT, "lieferscheine"), exist_ok=True)
     os.makedirs(os.path.join(DATA_ROOT, "suppliers"), exist_ok=True)
+    os.makedirs(os.path.join(DATA_ROOT, "signaturen"), exist_ok=True)  # NEU für Unterschriften
 
 def email_key(e: str) -> str:
     # saubere Ordnernamen pro Lieferant
@@ -640,4 +641,5 @@ else:
 
 st.markdown("---")
 st.caption("© 2025 Biomasse Abrechnung – Privatperson Otmar Riedl")
+
 
