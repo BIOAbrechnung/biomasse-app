@@ -269,7 +269,7 @@ def auth_tabs():
                 st.error("Passwörter stimmen nicht überein.")
             elif not accepted:
                 st.error("Bitte Haftungsausschluss akzeptieren.")
-            elif not can.image_data:
+            elif not hasattr(can, "image_data") or not can.image_data:
                 st.error("Bitte Unterschrift zeichnen.")
             else:
                 users = load_csv(USERS_FILE, ["email","pass_hash","status","registered_at","approved_at",
@@ -641,5 +641,6 @@ else:
 
 st.markdown("---")
 st.caption("© 2025 Biomasse Abrechnung – Privatperson Otmar Riedl")
+
 
 
