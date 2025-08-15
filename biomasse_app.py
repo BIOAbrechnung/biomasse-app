@@ -186,8 +186,76 @@ def hero_header(subtitle=""):
 
 # ===================== Auth Tabs =====================
 def auth_tabs():
-    hero_header("Login, Neu-Anmeldung & Admin-Freigabe")
-    tabs = st.tabs(["🔑 Login", "📝 Neu anmelden", "🛡️ Admin-Login"])
+    import streamlit as st
+    from streamlit_drawable_canvas import st_canvas
+    import os
+    from datetime import datetime
+    from PIL import Image
+    import io
+
+    st.subheader("Benutzeranmeldung / Registrierung")
+
+    tab_login, tab_register = st.tabs(["🔑 Login", "🆕 Registrierung"])
+
+    # ---------------- LOGIN ----------------
+    with tab_login:
+        st.write("Bitte melde dich mit deinen Zugangsdaten an.")
+        login_email = st.text_input("E-Mail", key="login_email")
+        login_pw = st.text_input("Passwort", type="password", key="login_pw")
+
+        if st.button("Anmelden", key="login_button"):
+            # TODO: hier deine Login-Logik einfügen
+            st.success(f"Login erfolgreich für {login_email}")
+
+    # ---------------- REGISTRIERUNG ----------------
+    with tab_register:
+        st.write("Bitte registriere dich hier.")
+
+        reg_email = st.text_input("E-Mail", key="register_email")
+        reg_pw1 = st.text_input("Passwort", type="password", key="register_pw1")
+        reg_pw2 = st.text_input("Passwort wiederholen", type="password", key="register_pw2")
+
+        st.write("**Haftungsausschluss:** Bitte lesen und akzeptieren.")
+        disclaimer_text = """
+        Durch die Registrierung stimmen Sie zu, dass alle erfassten Daten
+        ausschließlich für die Biomasse-Abrechnung genutzt werden.
+        """
+        st.info(disclaimer_text)
+
+        accepted = st.checkbox("Ich akzeptiere den Haftungsausschluss", key="register_accept")
+
+        st.write("**Bitte hier unterschreiben:**")
+        can = st_canvas(
+            fill_color="rgba(255, 255, 255, 0)",
+            stroke_width=2,
+            stroke_color="#000000",
+            background_color="#FFFFFF",
+            height=120,
+            width=500,
+            key="register_signature"
+        )
+
+        if st.button("Registrieren", key="register_button"):
+            if not reg_email or not reg_pw1 or not reg_pw2:
+                st.error("Bitte alle Felder ausfüllen.")
+            elif reg_pw1 != reg_pw2:
+                st.error("Passwörter stimmen nicht überein.")
+            elif not accepted:
+                st.error("Bitte Haftungsausschluss akzeptieren.")
+            elif not hasattr(can, "image_data") or can.image_data is None:
+                st.error("Bitte Unterschrift zeichnen.")
+            else:
+                # Speichern der Signatur
+                sig_img = Image.fromarray(can.image_data.astype("uint8"), "RGBA")
+                sig_path = os.path.join("data", "signatures", f"{reg_email}_sig.png")
+                os.makedirs(os.path.dirname(sig_path), exist_ok=True)
+                sig_img.save(sig_path)
+
+                # TODO: Hier User in CSV eintragen (Admin muss später freigeben)
+                # TODO: Hier E-Mails an Admin + Nutzer senden mit Anhang
+
+                st.success("Registrierung eingereicht. Admin muss bestätigen.")
+                st.info("Bestätigungsmail wurde an dich und den Admin gesendet.")
 
     # ------- Login -------
     with tabs[0]:
@@ -484,3 +552,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
