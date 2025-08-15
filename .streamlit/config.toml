@@ -1,4 +1,11 @@
+[theme]
+base="light"
+primaryColor="#1b8f3c"
+backgroundColor="#ffffff"
+secondaryBackgroundColor="#f1f6f1"
+textColor="#0b2713"
+
 [server]
-fileWatcherType = "none"
+headless = true
+enableCORS = false
 enableXsrfProtection = true
-enableCORS = true
