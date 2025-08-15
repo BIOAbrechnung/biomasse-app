@@ -1,6 +1,6 @@
-streamlit
-pandas
-fpdf
-Pillow
-streamlit-drawable-canvas
-python-dateutil
+streamlit==1.48.1
+pandas==2.3.1
+numpy==2.3.2
+Pillow==11.0.0
+fpdf2==2.7.9
+streamlit-drawable-canvas==0.9.3
