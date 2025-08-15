@@ -190,7 +190,28 @@ def canvas_signature(label: str, key: str, height: int = 140):
     except Exception:
         return None
 
-# =============== PDF-Erzeugung ===============
+# =============== PDF: Encoding-Helfer & Klassen ===============
+def to_pdf_text(x) -> str:
+    """
+    Macht Text Latin-1-kompatibel für pyfpdf.
+    Ersetzt problematische Zeichen (€, Gedankenstrich, …, ’) oder fällt auf 'replace' zurück.
+    """
+    if x is None:
+        return ""
+    s = str(x)
+    s = (
+        s.replace("€", "EUR")
+         .replace("–", "-")
+         .replace("—", "-")
+         .replace("…", "...")
+         .replace("’", "'")
+    )
+    try:
+        s.encode("latin-1")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("latin-1", "replace").decode("latin-1")
+
 class SimplePDF(FPDF):
     def header(self):
         try:
@@ -208,38 +229,19 @@ class SimplePDF(FPDF):
         except Exception:
             pass
         self.set_font("Arial", "B", 14)
-        self.cell(0, 10, "Biomasse Abrechnungs-System", ln=True, align="R")
+        self.cell(0, 10, to_pdf_text("Biomasse Abrechnungs-System"), ln=True, align="R")
         self.ln(2)
 
     def footer(self):
         self.set_y(-12)
         self.set_font("Arial", "I", 8)
         self.set_text_color(120, 120, 120)
-        self.cell(0, 10, f"Seite {self.page_no()}", align="C")
+        self.cell(0, 10, to_pdf_text(f"Seite {self.page_no()}"), align="C")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
-    def to_pdf_text(x):
     """
-    Macht Text Latin-1-kompatibel für pyfpdf.
-    Ersetzt problematische Zeichen (€, Gedankenstrich, …, ’).
+    UnicodeEncodeError-Fix: gib latin-1 Bytes zurück, ersetze nicht darstellbare Zeichen.
     """
-    if x is None:
-        return ""
-    s = str(x)
-    s = (s
-         .replace("€", "EUR")
-         .replace("–", "-")
-         .replace("—", "-")
-         .replace("…", "...")
-         .replace("’", "'"))
-    try:
-        s.encode("latin-1")
-        return s
-    except UnicodeEncodeError:
-        # Fallback: nicht darstellbare Zeichen ersetzen
-        return s.encode("latin-1", "replace").decode("latin-1")
-
-    """UnicodeEncodeError-Fix: latin-1 Bytes erzeugen."""
     s = pdf.output(dest="S")
     if isinstance(s, str):
         return s.encode("latin-1", "replace")
@@ -247,7 +249,7 @@ def _pdf_bytes(pdf: FPDF) -> bytes:
 
 def export_pdf_with_signature(pdf: SimplePDF, sig_img: Image.Image | None, label: str, x: int = 18, w: int = 60):
     pdf.set_font("Arial", "", 11)
-    pdf.cell(0, 8, label, ln=True)
+    pdf.cell(0, 8, to_pdf_text(label), ln=True)
     if sig_img:
         tmp = os.path.join(DATA_ROOT, f"sig_{uuid4().hex[:6]}.png")
         os.makedirs(DATA_ROOT, exist_ok=True)
@@ -282,16 +284,44 @@ def pdf_registration(reg: dict, sig_img: Image.Image | None) -> bytes:
     pdf.set_font("Arial", "", 11)
     disclaimer = (
         "Der/die Anmeldende erklärt, dass alle Angaben richtig sind. Die Nutzung der App erfolgt auf eigene "
-        "Verantwortung. Der Betreiber (Lotmar Riedl) haftet – soweit gesetzlich zulässig – nicht für mittelbare "
+        "Verantwortung. Der Betreiber (Lotmar Riedl) haftet - soweit gesetzlich zulässig - nicht für mittelbare "
         "oder unmittelbare Schäden, Datenverluste oder entgangenen Gewinn. Es gelten österreichisches Recht und "
         "die zwingenden Bestimmungen des EU-Verbraucherrechts. Mit Abgabe der Unterschrift wird der "
         "Haftungsausschluss akzeptiert."
     )
     pdf.multi_cell(0, 6, to_pdf_text(disclaimer))
     pdf.ln(6)
-    export_pdf_with_signature(pdf, sig_img, to_pdf_text("Unterschrift (Antragsteller/in):"), x=18, w=70)
+    export_pdf_with_signature(pdf, sig_img, "Unterschrift (Antragsteller/in):", x=18, w=70)
     return _pdf_bytes(pdf)
 
+def pdf_delivery(d: dict, sig_customer: Image.Image | None, sig_supplier: Image.Image | None) -> bytes:
+    """
+    Lieferschein-PDF. Alle Texte werden über to_pdf_text latin-1-sicher gemacht.
+    Erwartet Keys: delivery_id, ts, supplier, customer, material, amount, unit, price, total
+    """
+    pdf = SimplePDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(0, 10, to_pdf_text("Lieferschein / Biomasse"), ln=True)
+    pdf.set_font("Arial", "", 11)
+
+    for label, key in [
+        ("Nummer", "delivery_id"),
+        ("Datum/Zeit", "ts"),
+        ("Lieferant", "supplier"),
+        ("Kunde", "customer"),
+        ("Material", "material"),
+        ("Menge", "amount"),
+        ("Einheit", "unit"),
+        ("Preis/Einheit", "price"),
+        ("Summe", "total"),
+    ]:
+        pdf.cell(0, 8, to_pdf_text(f"{label}: {d.get(key, '')}"), ln=True)
+
+    pdf.ln(4)
+    export_pdf_with_signature(pdf, sig_supplier, "Unterschrift Lieferant:", x=18, w=60)
+    export_pdf_with_signature(pdf, sig_customer, "Unterschrift Kunde:", x=18, w=60)
+    return _pdf_bytes(pdf)
 
 # =============== DB-Layer ===============
 def db_get_suppliers():
@@ -510,7 +540,7 @@ def admin_area():
 def supplier_area(supplier_id: str):
     st.subheader("Lieferanten-Bereich")
 
-    # Reihenfolge: Lieferschein → Kunden → Materialien (wie gewünscht)
+    # Reihenfolge: Lieferschein → Kunden → Materialien
     tab_lieferschein, tab_kunden, tab_material = st.tabs(["Lieferschein", "Kunden", "Materialien"])
 
     # --- Lieferschein zuerst ---
@@ -609,8 +639,8 @@ def supplier_area(supplier_id: str):
                             "material": m_name,
                             "amount": f"{qty}",
                             "unit": unit,
-                            "price": f"{pr} €",
-                            "total": f"{total} €",
+                            "price": f"{pr} EUR",
+                            "total": f"{total} EUR",
                             "ts": ts,
                         },
                         sig_customer=sig_cus,
@@ -634,7 +664,7 @@ def supplier_area(supplier_id: str):
                         attachments=[(pdf_name, pdf_bytes, "application/pdf")]
                     )
 
-                    st.success(f"Lieferschein gespeichert. Summe: {total:.2f} €")
+                    st.success(f"Lieferschein gespeichert. Summe: {total:.2f} EUR")
                     st.download_button("PDF herunterladen", data=pdf_bytes, file_name=pdf_name, mime="application/pdf", key=f"dl_{delivery_id}")
 
     # --- Kunden ---
@@ -789,4 +819,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
