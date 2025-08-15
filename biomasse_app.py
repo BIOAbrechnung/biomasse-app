@@ -16,29 +16,28 @@ import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 from fpdf import FPDF
 
-
-# ===================== Grund-Setup / Styling =====================
+# ===================== Grund-Setup / Konstanten =====================
 
 APP_TITLE = "Biomasse Abrechnungs-App"
-ADMIN_PIN = "8319"  # Auf Wunsch fix im Code
+ADMIN_PIN = "8319"  # dein fixer Admin-PIN
 DATA_ROOT = "data"
 SUPPLIERS_FILE = os.path.join(DATA_ROOT, "suppliers.csv")
-USERS_FILE = os.path.join(DATA_ROOT, "users.csv")  # (Optional für spätere Erweiterungen)
 CUSTOMERS_FILE = os.path.join(DATA_ROOT, "customers.csv")
 MATERIALS_FILE = os.path.join(DATA_ROOT, "materials.csv")
 DELIVERY_FILE = os.path.join(DATA_ROOT, "deliveries.csv")
 REG_PDFS_DIR = os.path.join(DATA_ROOT, "registrations")
 DELIVERY_PDFS_DIR = os.path.join(DATA_ROOT, "lieferscheine")
-LOGO_PATH = "logo.png"  # bitte ins Repo-Root legen
+LOGO_PATH = "logo.png"  # optional im Repo-Root ablegen
 
-THEME_PRIMARY = "#198754"  # grüner Akzent (Bootstrap success)
+THEME_PRIMARY = "#198754"
 THEME_BG = "#0b1727"
 THEME_CARD = "#121f33"
 THEME_TEXT = "#f1f5f9"
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🟢", layout="wide")
 
-# Custom CSS
+# ===================== Styling =====================
+
 st.markdown(
     f"""
     <style>
@@ -53,13 +52,8 @@ st.markdown(
         padding: 18px 18px 6px 18px;
         box-shadow: 0 10px 30px rgba(0,0,0,.25);
       }}
-      .accent {{
-        color: {THEME_PRIMARY};
-        font-weight: 700;
-      }}
-      .muted {{
-        color: #9fb3c8;
-      }}
+      .accent {{ color: {THEME_PRIMARY}; font-weight: 700; }}
+      .muted {{ color: #9fb3c8; }}
       .stTabs [data-baseweb="tab-list"] button {{
         background: transparent;
         border: 1px solid rgba(255,255,255,.12);
@@ -76,70 +70,73 @@ st.markdown(
         border-radius: 12px;
         border: 1px solid rgba(255,255,255,.15);
       }}
-      .good {{ color: #22c55e; font-weight: 600; }}
-      .bad {{ color: #ef4444; font-weight: 600; }}
+      hr.soft {{ border: none; border-top: 1px solid rgba(255,255,255,.12); }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
-# ===================== Hilfsfunktionen (Dateien/CSV) =====================
+# ===================== Datei/CSV-Helfer =====================
 
 def ensure_dirs():
     os.makedirs(DATA_ROOT, exist_ok=True)
     os.makedirs(REG_PDFS_DIR, exist_ok=True)
     os.makedirs(DELIVERY_PDFS_DIR, exist_ok=True)
 
-
 def load_csv(path, headers):
     if not os.path.exists(path):
         with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
+            csv.writer(f).writerow(headers)
         return pd.DataFrame(columns=headers)
     try:
         df = pd.read_csv(path, dtype=str)
-        if set(headers) - set(df.columns):
-            # Spalten eines Altbestands ergänzen
-            for col in headers:
-                if col not in df.columns:
-                    df[col] = ""
-            df = df[headers]
-        return df
+        for h in headers:
+            if h not in df.columns:
+                df[h] = ""
+        return df[headers]
     except Exception:
         return pd.DataFrame(columns=headers)
-
 
 def save_csv(path, df):
     df.to_csv(path, index=False)
 
-
-def hash_password(pw: str) -> str:
-    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
-
+def hash_password(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 def check_password(pw: str, pw_hash: str) -> bool:
     return hash_password(pw) == pw_hash
 
-
 def new_id(prefix="ID"):
     return f"{prefix}_{uuid4().hex[:8]}"
 
+# ===================== Safe Logo-Lader =====================
+
+def safe_load_logo_bytes():
+    """Gibt Logo-Bytes zurück, wenn Datei existiert und ein valides Bild ist. Sonst None."""
+    if not os.path.exists(LOGO_PATH):
+        return None
+    try:
+        with open(LOGO_PATH, "rb") as f:
+            data = f.read()
+        # Validierung mit PIL (ohne komplettes Laden)
+        Image.open(io.BytesIO(data)).verify()
+        return data
+    except Exception:
+        return None
 
 # ===================== E-Mail Versand =====================
 
 def send_email(subject: str, body: str, to: list, attachments: list = None):
     """
-    attachments: list of tuples (filename, bytes, mime)
-    Secrets-Struktur (Streamlit Cloud → Settings → Secrets):
+    attachments: Liste [(filename, bytes, mime)]
+    Erforderliche Secrets (Streamlit Cloud → Settings → Secrets):
     [smtp]
-    host=""
+    host="smtp.gmail.com"
     port=465
-    user=""
-    password=""
+    user="app.biomasse@gmail.com"
+    password="APP_PASSWORT"
     use_ssl=true
-    from=""
+    from="app.biomasse@gmail.com"
     """
     try:
         smtp_conf = st.secrets["smtp"]
@@ -150,40 +147,36 @@ def send_email(subject: str, body: str, to: list, attachments: list = None):
         use_ssl = bool(smtp_conf.get("use_ssl", True))
         mail_from = smtp_conf.get("from", user)
     except Exception:
-        st.info("ℹ️ Kein SMTP in Secrets konfiguriert – E-Mail-Versand wird übersprungen.")
+        st.info("ℹ️ Kein SMTP in Secrets konfiguriert – Mailversand wird übersprungen.")
         return False
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = mail_from
-    msg["To"] = ", ".join(to)
+    msg["To"] = ", ".join([a for a in to if a])
     msg.set_content(body)
 
     if attachments:
         for fname, data, mime in attachments:
-            maintype, subtype = mime.split("/", 1)
-            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=fname)
+            m1, m2 = mime.split("/", 1)
+            msg.add_attachment(data, maintype=m1, subtype=m2, filename=fname)
 
     try:
         if use_ssl:
-            context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(host, port, context=context) as server:
-                if user:
-                    server.login(user, pwd)
-                server.send_message(msg)
+            with smtplib.SMTP_SSL(host, port, context=ssl.create_default_context()) as s:
+                if user: s.login(user, pwd)
+                s.send_message(msg)
         else:
-            with smtplib.SMTP(host, port) as server:
-                server.starttls()
-                if user:
-                    server.login(user, pwd)
-                server.send_message(msg)
+            with smtplib.SMTP(host, port) as s:
+                s.starttls()
+                if user: s.login(user, pwd)
+                s.send_message(msg)
         return True
     except Exception as e:
         st.warning(f"⚠️ E-Mail konnte nicht gesendet werden: {e}")
         return False
 
-
-# ===================== Signatur / Canvas Hilfen =====================
+# ===================== Canvas / Signaturen =====================
 
 def canvas_signature(label: str, key: str, height: int = 140):
     st.caption(label)
@@ -197,39 +190,40 @@ def canvas_signature(label: str, key: str, height: int = 140):
         drawing_mode="freedraw",
         key=key,
     )
-    # can.image_data ist ein np.ndarray oder None
     if can is None or getattr(can, "image_data", None) is None:
         return None
     arr = can.image_data
-    # prüfen ob überhaupt „Striche“ vorhanden sind (irgendetwas ≠ weiß)
     try:
-        if isinstance(arr, np.ndarray) and np.any(arr[:, :, 3] > 0):  # Alpha-Kanal genutzt
-            # In PIL Bild konvertieren (RGBA -> RGB mit weißem Hintergrund)
-            pil = Image.fromarray(arr.astype("uint8"), mode="RGBA")
-            bg = Image.new("RGB", pil.size, (255, 255, 255))
-            bg.paste(pil, mask=pil.split()[3])
-            return bg
-        else:
+        # Irgendein Pixel mit Alpha > 0 => gezeichnet
+        drawn = isinstance(arr, np.ndarray) and arr.ndim == 3 and arr.shape[2] >= 4 and np.any(arr[:, :, 3] > 0)
+        if not drawn:
             return None
+        pil = Image.fromarray(arr.astype("uint8"), mode="RGBA")
+        bg = Image.new("RGB", pil.size, (255, 255, 255))
+        bg.paste(pil, mask=pil.split()[3])
+        return bg
     except Exception:
         return None
 
-
-def image_to_png_bytes(img: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
-# ===================== PDF Generatoren =====================
+# ===================== PDF-Erzeugung =====================
 
 class SimplePDF(FPDF):
     def header(self):
-        if os.path.exists(LOGO_PATH):
-            try:
-                self.image(LOGO_PATH, 10, 8, 22)
-            except Exception:
-                pass
+        try:
+            # Wir nutzen safe Logo nur im Header, wenn valide
+            logo_bytes = safe_load_logo_bytes()
+            if logo_bytes:
+                tmp = os.path.join(DATA_ROOT, "tmp_logo.png")
+                os.makedirs(DATA_ROOT, exist_ok=True)
+                with open(tmp, "wb") as f:
+                    f.write(logo_bytes)
+                self.image(tmp, 10, 8, 22)
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self.set_font("Arial", "B", 14)
         self.cell(0, 10, "Biomasse Abrechnungs-System", ln=True, align="R")
         self.ln(2)
@@ -240,12 +234,16 @@ class SimplePDF(FPDF):
         self.set_text_color(120, 120, 120)
         self.cell(0, 10, f"Seite {self.page_no()}", align="C")
 
+def _pdf_bytes(pdf: FPDF) -> bytes:
+    s = pdf.output(dest="S")
+    if isinstance(s, str):
+        return s.encode("latin-1")
+    return s
 
-def export_pdf_with_signature(pdf: SimplePDF, sig_img: Image.Image | None, x: int, w: int, label: str):
+def export_pdf_with_signature(pdf: SimplePDF, sig_img: Image.Image | None, label: str, x: int = 18, w: int = 60):
     pdf.set_font("Arial", "", 11)
     pdf.cell(0, 8, label, ln=True)
     if sig_img:
-        # temporär speichern
         tmp = os.path.join(DATA_ROOT, f"sig_{uuid4().hex[:6]}.png")
         os.makedirs(DATA_ROOT, exist_ok=True)
         try:
@@ -262,41 +260,32 @@ def export_pdf_with_signature(pdf: SimplePDF, sig_img: Image.Image | None, x: in
     else:
         pdf.ln(8)
 
-
 def pdf_registration(reg: dict, sig_img: Image.Image | None) -> bytes:
     pdf = SimplePDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 13)
     pdf.cell(0, 10, "Neuanmeldung Lieferant (Haftungsausschluss)", ln=True)
     pdf.set_font("Arial", "", 11)
-
     pdf.cell(0, 8, f"Datum: {datetime.now().strftime('%d.%m.%Y %H:%M')}", ln=True)
-    for k in ["firma", "email", "telefon", "adresse"]:
-        pdf.cell(0, 8, f"{k.capitalize()}: {reg.get(k, '')}", ln=True)
+
+    for k, label in [("firma","Firma"), ("email","E-Mail"), ("telefon","Telefon"), ("adresse","Adresse")]:
+        pdf.cell(0, 8, f"{label}: {reg.get(k, '')}", ln=True)
 
     pdf.ln(4)
     pdf.set_font("Arial", "B", 12)
     pdf.cell(0, 8, "Haftungsausschluss:", ln=True)
     pdf.set_font("Arial", "", 11)
     disclaimer = (
-        "Der/die Anmeldende erklärt, dass alle gemachten Angaben richtig sind. "
-        "Die Nutzung der App erfolgt auf eigene Verantwortung. Der Betreiber "
-        "(Lotmar Riedl) übernimmt – soweit gesetzlich zulässig – keine Haftung "
-        "für mittelbare oder unmittelbare Schäden, Datenverluste oder entgangenen "
-        "Gewinn. Es gelten österreichisches Recht und die zwingenden Bestimmungen "
-        "des Verbraucherrechts der EU. Mit Abgabe der Unterschrift wird der "
+        "Der/die Anmeldende erklärt, dass alle Angaben richtig sind. Die Nutzung der App erfolgt auf eigene "
+        "Verantwortung. Der Betreiber (Lotmar Riedl) haftet – soweit gesetzlich zulässig – nicht für mittelbare "
+        "oder unmittelbare Schäden, Datenverluste oder entgangenen Gewinn. Es gelten österreichisches Recht und "
+        "die zwingenden Bestimmungen des EU-Verbraucherrechts. Mit Abgabe der Unterschrift wird der "
         "Haftungsausschluss akzeptiert."
     )
     pdf.multi_cell(0, 6, disclaimer)
-
     pdf.ln(6)
-    export_pdf_with_signature(pdf, sig_img, x=18, w=70, label="Unterschrift (Antragsteller/in):")
-
-    # Bytes zurückgeben
-    out = io.BytesIO()
-    pdf.output(out)
-    return out.getvalue()
-
+    export_pdf_with_signature(pdf, sig_img, "Unterschrift (Antragsteller/in):", x=18, w=70)
+    return _pdf_bytes(pdf)
 
 def pdf_delivery(d: dict, sig_customer: Image.Image | None, sig_supplier: Image.Image | None) -> bytes:
     pdf = SimplePDF()
@@ -319,67 +308,55 @@ def pdf_delivery(d: dict, sig_customer: Image.Image | None, sig_supplier: Image.
         pdf.cell(0, 8, f"{label}: {d.get(key, '')}", ln=True)
 
     pdf.ln(4)
-    export_pdf_with_signature(pdf, sig_supplier, x=18, w=60, label="Unterschrift Lieferant:")
-    export_pdf_with_signature(pdf, sig_customer, x=18, w=60, label="Unterschrift Kunde:")
+    export_pdf_with_signature(pdf, sig_supplier, "Unterschrift Lieferant:", x=18, w=60)
+    export_pdf_with_signature(pdf, sig_customer, "Unterschrift Kunde:", x=18, w=60)
+    return _pdf_bytes(pdf)
 
-    out = io.BytesIO()
-    pdf.output(out)
-    return out.getvalue()
-
-
-# ===================== Daten-Schichten =====================
+# ===================== DB-Layer =====================
 
 def db_get_suppliers():
     return load_csv(SUPPLIERS_FILE, ["supplier_id", "firma", "email", "telefon", "adresse", "pw_hash", "status", "created"])
 
-
-def db_save_suppliers(df):
-    save_csv(SUPPLIERS_FILE, df)
-
+def db_save_suppliers(df): save_csv(SUPPLIERS_FILE, df)
 
 def db_get_customers():
     return load_csv(CUSTOMERS_FILE, ["customer_id", "supplier_id", "name", "adresse", "email", "telefon"])
 
-
-def db_save_customers(df):
-    save_csv(CUSTOMERS_FILE, df)
-
+def db_save_customers(df): save_csv(CUSTOMERS_FILE, df)
 
 def db_get_materials():
     return load_csv(MATERIALS_FILE, ["material_id", "supplier_id", "customer_id", "name", "einheit", "preis"])
 
-
-def db_save_materials(df):
-    save_csv(MATERIALS_FILE, df)
-
+def db_save_materials(df): save_csv(MATERIALS_FILE, df)
 
 def db_get_deliveries():
     return load_csv(DELIVERY_FILE, ["delivery_id", "supplier_id", "customer_id", "material", "amount", "unit", "price", "total", "ts"])
 
+def db_save_deliveries(df): save_csv(DELIVERY_FILE, df)
 
-def db_save_deliveries(df):
-    save_csv(DELIVERY_FILE, df)
-
-
-# ===================== UI Bausteine =====================
+# ===================== UI-Bausteine =====================
 
 def app_header():
     cols = st.columns([1, 6, 1])
     with cols[0]:
-        if os.path.exists(LOGO_PATH):
-            st.image(LOGO_PATH, use_container_width=True)
+        logo_bytes = safe_load_logo_bytes()
+        if logo_bytes:
+            st.image(logo_bytes, use_container_width=True)
+        else:
+            st.markdown("<div style='font-size:42px;line-height:1.1;'>🌿</div>", unsafe_allow_html=True)
     with cols[1]:
         st.markdown(f"<h2 style='margin-bottom:3px;'>{APP_TITLE}</h2>", unsafe_allow_html=True)
         st.markdown("<div class='muted'>Abrechnung • Lieferscheine • Kunden & Materialien</div>", unsafe_allow_html=True)
     with cols[2]:
         st.markdown(f"<div style='text-align:right;'>🟢 <span class='accent'>Online</span></div>", unsafe_allow_html=True)
-    st.markdown("<hr style='opacity:.15;'>", unsafe_allow_html=True)
-
+    st.markdown("<hr class='soft'>", unsafe_allow_html=True)
 
 def info_box(title, body):
-    with st.container():
-        st.markdown(f"<div class='app-card'><div class='accent'>{title}</div><div class='muted' style='margin-top:6px;'>{body}</div></div>", unsafe_allow_html=True)
-
+    st.markdown(
+        f"<div class='app-card'><div class='accent'>{title}</div>"
+        f"<div class='muted' style='margin-top:6px;'>{body}</div></div>",
+        unsafe_allow_html=True
+    )
 
 # ===================== Auth / Registrierung =====================
 
@@ -388,7 +365,7 @@ def auth_tabs():
 
     tab_login, tab_register, tab_admin = st.tabs(["Lieferanten-Login", "Lieferant neu anmelden", "Admin-Login"])
 
-    # ---- Lieferanten-Login
+    # Lieferanten-Login
     with tab_login:
         st.markdown("#### Lieferanten-Login")
         le = st.text_input("E-Mail", key="login_email")
@@ -401,7 +378,7 @@ def auth_tabs():
             else:
                 row = row.iloc[0]
                 if row["status"] != "active":
-                    st.warning("Noch nicht freigeschaltet. Bitte warten, bis der Admin dich aktiviert.")
+                    st.warning("Noch nicht freigeschaltet. Bitte auf Admin-Freigabe warten.")
                 elif not check_password(lp, row["pw_hash"]):
                     st.error("Passwort falsch.")
                 else:
@@ -410,7 +387,7 @@ def auth_tabs():
                     st.session_state["supplier_email"] = row["email"]
                     st.success("Login erfolgreich.")
 
-    # ---- Lieferanten-Neuanmeldung (mit Disclaimer + Unterschrift + PDF + E-Mail)
+    # Neuanmeldung mit Haftungsausschluss + Unterschrift + PDF + Mail
     with tab_register:
         st.markdown("#### Lieferant neu anmelden")
         firma = st.text_input("Firmenname", key="reg_firma")
@@ -422,9 +399,9 @@ def auth_tabs():
 
         st.markdown("**Haftungsausschluss** (EU/Österreich):")
         st.markdown(
-            "Mit der Registrierung bestätige ich die Richtigkeit meiner Angaben und akzeptiere den "
-            "Haftungsausschluss. Die Nutzung erfolgt auf eigene Verantwortung. Es gelten österreichisches Recht "
-            "und die zwingenden Bestimmungen des EU-Verbraucherrechts."
+            "Mit der Registrierung bestätige ich die Richtigkeit meiner Angaben und akzeptiere den Haftungsausschluss. "
+            "Die Nutzung erfolgt auf eigene Verantwortung. Es gelten österreichisches Recht und die zwingenden Bestimmungen "
+            "des EU-Verbraucherrechts."
         )
         accepted = st.checkbox("Ich akzeptiere den Haftungsausschluss.", key="reg_accept")
 
@@ -458,7 +435,7 @@ def auth_tabs():
                     sup = pd.concat([sup, pd.DataFrame([new_row])], ignore_index=True)
                     db_save_suppliers(sup)
 
-                    # PDF bauen
+                    # PDF
                     pdf_bytes = pdf_registration(
                         {"firma": firma, "email": email, "telefon": telefon, "adresse": adresse},
                         sig
@@ -468,19 +445,17 @@ def auth_tabs():
                     with open(os.path.join(REG_PDFS_DIR, pdf_name), "wb") as f:
                         f.write(pdf_bytes)
 
-                    # E-Mail an Admin & Antragsteller
+                    # E-Mails
                     subject = "Neue Lieferanten-Registrierung (Biomasse-App)"
                     body = (
                         f"Neue Registrierung eingegangen:\n\n"
                         f"Firma: {firma}\nE-Mail: {email}\nTelefon: {telefon}\nAdresse: {adresse}\n\n"
                         f"Bitte im Admin-Bereich freischalten."
                     )
-                    attachments = [(pdf_name, pdf_bytes, "application/pdf")]
-                    send_email(subject, body, ["app.biomasse@gmail.com", email], attachments)
+                    send_email(subject, body, ["app.biomasse@gmail.com", email], [(pdf_name, pdf_bytes, "application/pdf")])
+                    st.success("Antrag eingereicht. Admin wird dich freischalten. PDF wurde per E-Mail versendet.")
 
-                    st.success("Antrag eingereicht. Der Admin wird dich freischalten. PDF wurde per E-Mail versendet.")
-
-    # ---- Admin-Login (E-Mail + PIN)
+    # Admin-Login
     with tab_admin:
         st.markdown("#### Admin-Login")
         admin_email = st.text_input("Admin-E-Mail", key="adm_email")
@@ -492,7 +467,6 @@ def auth_tabs():
                 st.success("Admin erfolgreich angemeldet.")
             else:
                 st.error("Falsche PIN oder E-Mail leer.")
-
 
 # ===================== Admin-Bereich =====================
 
@@ -508,33 +482,24 @@ def admin_area():
         st.info("Keine ausstehenden Anträge.")
     else:
         for _, row in pending.iterrows():
-            with st.container():
-                st.markdown("<div class='app-card'>", unsafe_allow_html=True)
-                cols = st.columns([3, 3, 3, 1.5, 1.5])
-                cols[0].markdown(f"**Firma:** {row['firma']}  \n**E-Mail:** {row['email']}")
-                cols[1].markdown(f"**Telefon:** {row['telefon']}  \n**Adresse:** {row['adresse']}")
-                cols[2].markdown(f"**Angelegt:** {row['created']}  \n**Status:** {row['status']}")
-                if cols[3].button("Annehmen", key=f"accept_{row['supplier_id']}"):
-                    sup.loc[sup["supplier_id"] == row["supplier_id"], "status"] = "active"
-                    db_save_suppliers(sup)
-                    send_email(
-                        "Freischaltung Biomasse-App",
-                        "Dein Zugang wurde freigeschaltet. Bitte erneut einloggen.",
-                        [row["email"]],
-                    )
-                    st.success(f"{row['firma']} freigeschaltet.")
-                    st.rerun()
-                if cols[4].button("Ablehnen", key=f"reject_{row['supplier_id']}"):
-                    sup = sup.loc[sup["supplier_id"] != row["supplier_id"]]
-                    db_save_suppliers(sup)
-                    send_email(
-                        "Antrag abgelehnt (Biomasse-App)",
-                        "Leider wurde dein Antrag abgelehnt. Für Rückfragen bitte antworten.",
-                        [row["email"]],
-                    )
-                    st.warning("Antrag abgelehnt und gelöscht.")
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<div class='app-card'>", unsafe_allow_html=True)
+            cols = st.columns([3, 3, 3, 1.5, 1.5])
+            cols[0].markdown(f"**Firma:** {row['firma']}  \n**E-Mail:** {row['email']}")
+            cols[1].markdown(f"**Telefon:** {row['telefon']}  \n**Adresse:** {row['adresse']}")
+            cols[2].markdown(f"**Angelegt:** {row['created']}  \n**Status:** {row['status']}")
+            if cols[3].button("Annehmen", key=f"accept_{row['supplier_id']}"):
+                sup.loc[sup["supplier_id"] == row["supplier_id"], "status"] = "active"
+                db_save_suppliers(sup)
+                send_email("Freischaltung Biomasse-App", "Dein Zugang wurde freigeschaltet. Bitte erneut einloggen.", [row["email"]])
+                st.success(f"{row['firma']} freigeschaltet.")
+                st.rerun()
+            if cols[4].button("Ablehnen", key=f"reject_{row['supplier_id']}"):
+                sup = sup.loc[sup["supplier_id"] != row["supplier_id"]]
+                db_save_suppliers(sup)
+                send_email("Antrag abgelehnt (Biomasse-App)", "Leider wurde dein Antrag abgelehnt.", [row["email"]])
+                st.warning("Antrag abgelehnt und gelöscht.")
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("##### Aktive Lieferanten")
     if active.empty:
@@ -553,40 +518,30 @@ def admin_area():
                 mail = sup.loc[sup["supplier_id"] == del_id, "email"].iloc[0]
                 sup2 = sup.loc[sup["supplier_id"] != del_id]
                 db_save_suppliers(sup2)
-                # Zugehörige Kunden/Materialien/Lieferscheine entfernen
+                # Kaskaden-Löschung
                 cust = db_get_customers()
                 mats = db_get_materials()
                 dels = db_get_deliveries()
-                cust = cust.loc[cust["supplier_id"] != del_id]
-                mats = mats.loc[mats["supplier_id"] != del_id]
-                dels = dels.loc[dels["supplier_id"] != del_id]
-                db_save_customers(cust)
-                db_save_materials(mats)
-                db_save_deliveries(dels)
-                send_email(
-                    "Zugang gelöscht (Biomasse-App)",
-                    "Dein Zugang wurde vom Admin gelöscht.",
-                    [mail],
-                )
+                db_save_customers(cust.loc[cust["supplier_id"] != del_id])
+                db_save_materials(mats.loc[mats["supplier_id"] != del_id])
+                db_save_deliveries(dels.loc[dels["supplier_id"] != del_id])
+                send_email("Zugang gelöscht (Biomasse-App)", "Dein Zugang wurde vom Admin gelöscht.", [mail])
                 st.success("Lieferant und zugehörige Daten gelöscht.")
             else:
                 st.warning("Supplier ID nicht gefunden.")
 
-
-# ===================== Lieferant-Bereich =====================
+# ===================== Lieferanten-Bereich =====================
 
 def supplier_area(supplier_id: str):
     st.subheader("Lieferanten-Bereich")
-
     tab_kunden, tab_material, tab_lieferschein = st.tabs(["Kunden", "Materialien", "Lieferschein"])
 
-    # ---- Kunden
+    # Kunden
     with tab_kunden:
         st.markdown("##### Kunden verwalten")
         cust = db_get_customers()
         my = cust.loc[cust["supplier_id"] == supplier_id].copy()
 
-        # Suche
         q = st.text_input("Kunden suchen (Name/Adresse/E-Mail/Telefon)", key="cust_search")
         if q.strip():
             mask = (
@@ -628,7 +583,6 @@ def supplier_area(supplier_id: str):
             if (cust2["customer_id"] == del_cust).any() and (cust2.loc[cust2["customer_id"] == del_cust, "supplier_id"].iloc[0] == supplier_id):
                 cust2 = cust2.loc[cust2["customer_id"] != del_cust]
                 db_save_customers(cust2)
-                # zugehörige Materialien mit customer_id löschen
                 mats = db_get_materials()
                 mats = mats.loc[mats["customer_id"] != del_cust]
                 db_save_materials(mats)
@@ -637,7 +591,7 @@ def supplier_area(supplier_id: str):
             else:
                 st.warning("Customer ID nicht gefunden oder gehört dir nicht.")
 
-    # ---- Materialien
+    # Materialien
     with tab_material:
         st.markdown("##### Materialien pro Kunde")
         cust = db_get_customers()
@@ -647,11 +601,7 @@ def supplier_area(supplier_id: str):
         if my_c.empty:
             st.info("Bitte zuerst einen Kunden anlegen.")
         else:
-            sel_cust_name = st.selectbox(
-                "Kunde auswählen",
-                my_c["name"].tolist(),
-                key="mat_sel_cust"
-            )
+            sel_cust_name = st.selectbox("Kunde auswählen", my_c["name"].tolist(), key="mat_sel_cust")
             sel_cust_id = my_c.loc[my_c["name"] == sel_cust_name, "customer_id"].iloc[0]
             my_mats = mats.loc[(mats["supplier_id"] == supplier_id) & (mats["customer_id"] == sel_cust_id)]
 
@@ -666,7 +616,6 @@ def supplier_area(supplier_id: str):
                 if not m_name.strip():
                     st.error("Materialname fehlt.")
                 else:
-                    # Prüfen ob Material schon existiert (Name + Kunde)
                     exists = my_mats.loc[my_mats["name"].str.lower() == m_name.strip().lower()]
                     if exists.empty:
                         new_row = {
@@ -681,7 +630,6 @@ def supplier_area(supplier_id: str):
                         db_save_materials(mats)
                         st.success("Material hinzugefügt.")
                     else:
-                        # Update Preis/Einheit
                         idx = exists.index[0]
                         mats.loc[idx, "einheit"] = m_unit
                         mats.loc[idx, "preis"] = m_price.strip()
@@ -701,7 +649,7 @@ def supplier_area(supplier_id: str):
                 else:
                     st.warning("Material ID nicht gefunden oder gehört dir nicht.")
 
-    # ---- Lieferschein
+    # Lieferschein
     with tab_lieferschein:
         st.markdown("##### Lieferschein erfassen")
 
@@ -730,7 +678,7 @@ def supplier_area(supplier_id: str):
         with colA:
             amount = st.text_input("Menge (Zahl)", key="dlv_amount")
         with colB:
-            st.caption("Optional statt Menge: Voll/Leer Gewicht")
+            st.caption("Optional statt Menge: Voll/Leer (kg)")
             voll = st.text_input("Voll (kg)", key="dlv_voll")
             leer = st.text_input("Leer (kg)", key="dlv_leer")
 
@@ -739,21 +687,21 @@ def supplier_area(supplier_id: str):
         sig_cus = canvas_signature("Kunde unterschreibt hier:", key="sig_customer")
 
         if st.button("Lieferschein speichern (PDF & E-Mail)", key="btn_dlv_save"):
-            # Menge ermitteln
+            # Menge berechnen
             qty = None
             try:
                 if amount.strip():
                     qty = float(amount.replace(",", "."))
                 elif voll.strip() and leer.strip():
                     qty = max(0.0, float(voll.replace(",", ".")) - float(leer.replace(",", ".")))
-                    # wenn Einheit kg/t: bei t ggf. /1000
                     if unit == "t":
                         qty = qty / 1000.0
                 else:
-                    st.error("Bitte Menge eingeben oder Voll/Leer angeben.")
+                    st.error("Bitte Menge oder Voll/Leer angeben.")
                     return
             except Exception:
                 st.error("Mengenangaben ungültig.")
+            if qty is None:
                 return
 
             try:
@@ -766,7 +714,7 @@ def supplier_area(supplier_id: str):
             delivery_id = new_id("DLV")
             ts = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-            # Speichern in CSV
+            # CSV
             dels = db_get_deliveries()
             row = {
                 "delivery_id": delivery_id,
@@ -803,7 +751,7 @@ def supplier_area(supplier_id: str):
             with open(os.path.join(DELIVERY_PDFS_DIR, pdf_name), "wb") as f:
                 f.write(pdf_bytes)
 
-            # Mail (an Lieferant + optional Kunde)
+            # Mail an Lieferant + ggf. Kunde
             cust_df = db_get_customers()
             cust_mail = cust_df.loc[cust_df["customer_id"] == c_id, "email"].iloc[0]
             to_list = [st.session_state.get("supplier_email", "")]
@@ -819,8 +767,7 @@ def supplier_area(supplier_id: str):
             st.success(f"Lieferschein gespeichert. Summe: {total:.2f} €")
             st.download_button("PDF herunterladen", data=pdf_bytes, file_name=pdf_name, mime="application/pdf", key=f"dl_{delivery_id}")
 
-
-# ===================== Haupt-Routing =====================
+# ===================== Hauptprogramm =====================
 
 def main():
     ensure_dirs()
@@ -829,9 +776,14 @@ def main():
     role = st.session_state.get("role")
 
     if not role:
-        # Startseite / Hinweise
         info_box("Willkommen!", "Melde dich als Lieferant an, registriere dich neu oder gehe in den Admin-Bereich.")
         auth_tabs()
+        # Sidebar
+        with st.sidebar:
+            st.markdown("### Navigation")
+            st.info("Nicht eingeloggt")
+        st.markdown("<hr class='soft'>", unsafe_allow_html=True)
+        st.caption("Datenschutz: Es werden nur zur Abrechnung notwendige Daten gespeichert. PDFs/CSVs liegen im App-Speicher. E-Mails gehen ausschließlich an Beteiligte.")
         return
 
     if role == "admin":
@@ -844,22 +796,15 @@ def main():
             st.rerun()
         supplier_area(supplier_id)
 
-    # Sidebar: Logout
     with st.sidebar:
         st.markdown("### Navigation")
-        if role:
-            st.info(f"Eingeloggt als: **{role}**")
-            if st.button("Logout", key="btn_logout"):
-                st.session_state.clear()
-                st.rerun()
+        st.info(f"Eingeloggt als: **{role}**")
+        if st.button("Logout", key="btn_logout"):
+            st.session_state.clear()
+            st.rerun()
 
-    # Fußbereich – kurze Datenschutzinfo
-    st.markdown("<hr style='opacity:.15;'>", unsafe_allow_html=True)
-    st.caption(
-        "Datenschutzhinweis: Es werden nur zur Abrechnung notwendige Daten gespeichert. "
-        "PDFs und CSVs liegen im App-Speicher. E-Mails gehen ausschließlich an Beteiligte."
-    )
-
+    st.markdown("<hr class='soft'>", unsafe_allow_html=True)
+    st.caption("Datenschutz: Es werden nur zur Abrechnung notwendige Daten gespeichert. PDFs/CSVs liegen im App-Speicher. E-Mails gehen ausschließlich an Beteiligte.")
 
 if __name__ == "__main__":
     main()
