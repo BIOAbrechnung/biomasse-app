@@ -218,6 +218,27 @@ class SimplePDF(FPDF):
         self.cell(0, 10, f"Seite {self.page_no()}", align="C")
 
 def _pdf_bytes(pdf: FPDF) -> bytes:
+    def to_pdf_text(x):
+    """
+    Macht Text Latin-1-kompatibel für pyfpdf.
+    Ersetzt problematische Zeichen (€, Gedankenstrich, …, ’).
+    """
+    if x is None:
+        return ""
+    s = str(x)
+    s = (s
+         .replace("€", "EUR")
+         .replace("–", "-")
+         .replace("—", "-")
+         .replace("…", "...")
+         .replace("’", "'"))
+    try:
+        s.encode("latin-1")
+        return s
+    except UnicodeEncodeError:
+        # Fallback: nicht darstellbare Zeichen ersetzen
+        return s.encode("latin-1", "replace").decode("latin-1")
+
     """UnicodeEncodeError-Fix: latin-1 Bytes erzeugen."""
     s = pdf.output(dest="S")
     if isinstance(s, str):
@@ -248,16 +269,16 @@ def pdf_registration(reg: dict, sig_img: Image.Image | None) -> bytes:
     pdf = SimplePDF()
     pdf.add_page()
     pdf.set_font("Arial", "B", 13)
-    pdf.cell(0, 10, "Neuanmeldung Lieferant (Haftungsausschluss)", ln=True)
+    pdf.cell(0, 10, to_pdf_text("Neuanmeldung Lieferant (Haftungsausschluss)"), ln=True)
     pdf.set_font("Arial", "", 11)
-    pdf.cell(0, 8, f"Datum: {datetime.now().strftime('%d.%m.%Y %H:%M')}", ln=True)
+    pdf.cell(0, 8, to_pdf_text(f"Datum: {datetime.now().strftime('%d.%m.%Y %H:%M')}"), ln=True)
 
     for k, label in [("firma","Firma"), ("email","E-Mail"), ("telefon","Telefon"), ("adresse","Adresse")]:
-        pdf.cell(0, 8, f"{label}: {reg.get(k, '')}", ln=True)
+        pdf.cell(0, 8, to_pdf_text(f"{label}: {reg.get(k, '')}"), ln=True)
 
     pdf.ln(4)
     pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "Haftungsausschluss (EU/Österreich):", ln=True)
+    pdf.cell(0, 8, to_pdf_text("Haftungsausschluss:"), ln=True)
     pdf.set_font("Arial", "", 11)
     disclaimer = (
         "Der/die Anmeldende erklärt, dass alle Angaben richtig sind. Die Nutzung der App erfolgt auf eigene "
@@ -266,35 +287,11 @@ def pdf_registration(reg: dict, sig_img: Image.Image | None) -> bytes:
         "die zwingenden Bestimmungen des EU-Verbraucherrechts. Mit Abgabe der Unterschrift wird der "
         "Haftungsausschluss akzeptiert."
     )
-    pdf.multi_cell(0, 6, disclaimer)
+    pdf.multi_cell(0, 6, to_pdf_text(disclaimer))
     pdf.ln(6)
-    export_pdf_with_signature(pdf, sig_img, "Unterschrift (Antragsteller/in):", x=18, w=70)
+    export_pdf_with_signature(pdf, sig_img, to_pdf_text("Unterschrift (Antragsteller/in):"), x=18, w=70)
     return _pdf_bytes(pdf)
 
-def pdf_delivery(d: dict, sig_customer: Image.Image | None, sig_supplier: Image.Image | None) -> bytes:
-    pdf = SimplePDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 13)
-    pdf.cell(0, 10, "Lieferschein / Biomasse", ln=True)
-    pdf.set_font("Arial", "", 11)
-
-    for label, key in [
-        ("Nummer", "delivery_id"),
-        ("Datum/Zeit", "ts"),
-        ("Lieferant", "supplier"),
-        ("Kunde", "customer"),
-        ("Material", "material"),
-        ("Menge", "amount"),
-        ("Einheit", "unit"),
-        ("Preis/Einheit", "price"),
-        ("Summe", "total"),
-    ]:
-        pdf.cell(0, 8, f"{label}: {d.get(key, '')}", ln=True)
-
-    pdf.ln(4)
-    export_pdf_with_signature(pdf, sig_supplier, "Unterschrift Lieferant:", x=18, w=60)
-    export_pdf_with_signature(pdf, sig_customer, "Unterschrift Kunde:", x=18, w=60)
-    return _pdf_bytes(pdf)
 
 # =============== DB-Layer ===============
 def db_get_suppliers():
@@ -792,3 +789,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
